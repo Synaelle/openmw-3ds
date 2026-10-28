@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 /// The project's GitHub repository (owner/name): its releases page and the update check.
-pub const REPOSITORY: &str = "Synaelle/OpenMW-3DS";
+pub const REPOSITORY: &str = "Synaelle/openmw-3ds";
 
 pub fn releases_page() -> String {
     format!("https://github.com/{REPOSITORY}/releases/latest")

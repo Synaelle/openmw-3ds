@@ -17,7 +17,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Version,
     [switch]$SkipBuild,
     [switch]$Draft,
-    [string]$Repository = 'Synaelle/OpenMW-3DS'
+    [string]$Repository = 'Synaelle/openmw-3ds'
 )
 $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
