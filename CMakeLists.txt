@@ -40,7 +40,7 @@ if (OPENMW_PLATFORM_3DS)
             set(OPENMW3DS_VERSION "0.2.0-dev${CMAKE_MATCH_1}")
         endif()
     endif()
-    # A release build (scripts/make-release.ps1) names its version: 0.1.0, no test number.
+    # A release build (3ds/ci/build-cia.sh) names its version, with no test number.
     set(OPENMW3DS_RELEASE_VERSION "" CACHE STRING "The release's version (empty: 0.1.0-dev<test>)")
     if (OPENMW3DS_RELEASE_VERSION)
         set(OPENMW3DS_VERSION "${OPENMW3DS_RELEASE_VERSION}")

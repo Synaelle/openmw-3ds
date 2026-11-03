@@ -14,7 +14,7 @@ param(
     # Debug tools (bottom-screen debug display, autorun, detailed profiling) are on unless -NoDebug. Chosen on
     # every configure like the Bullet precision (switching rebuilds everything).
     [switch]$NoDebug,
-    # A release's version (scripts\make-release.ps1): shown instead of 0.1.0-dev<test>. Empty: the test's.
+    # A release's version (the release workflows): shown instead of <version>-dev<test>. Empty: the test's.
     [string]$Version = '',
     [string]$Msys2Root = 'C:\msys64'
 )
