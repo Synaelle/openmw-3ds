@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Cross-builds OpenMW's third-party dependencies for the 3DS into $PREFIX.
-# Run through scripts/build-deps.ps1 (MSYS2). Usage: build-deps.sh [component...]
+# Run through scripts/build-deps.ps1 (MSYS2) on Windows, or directly on Linux. Usage: build-deps.sh [component...]
 # With no arguments, builds every component not yet built (stamp files in $PREFIX/.stamps).
 set -euo pipefail
 
@@ -258,13 +258,19 @@ build_icu() {
     unzip -q "$DL/icu4c-$vu-data.zip" -d "$src"
     local host="$BUILD/icu-host" cross="$BUILD/icu-3ds"
 
-    # 1. Native host build (MSYS2 UCRT64 MinGW): ICU runs its own tools to build its data.
+    # 1. Native host build (MSYS2 UCRT64 MinGW on Windows, the system compiler on Linux): ICU runs its own tools to
+    #    build its data.
     rm -rf "$host"; mkdir -p "$host"
     # ICU 70 defaults to -std=c++11 -pedantic, which GCC 16's <limits> rejects: use gnu++17.
-    env MSYSTEM=UCRT64 CHERE_INVOKING=1 CFLAGS="-O2" CXXFLAGS="-O2 -std=gnu++17" \
-        bash -lc "cd '$host' && '$src/runConfigureICU' MinGW \
-        --disable-tests --disable-samples --disable-extras --disable-icuio \
-        && make -j$JOBS"
+    if [ -n "${MSYSTEM:-}" ]; then
+        env MSYSTEM=UCRT64 CHERE_INVOKING=1 CFLAGS="-O2" CXXFLAGS="-O2 -std=gnu++17" \
+            bash -lc "cd '$host' && '$src/runConfigureICU' MinGW \
+            --disable-tests --disable-samples --disable-extras --disable-icuio \
+            && make -j$JOBS"
+    else
+        (cd "$host" && CFLAGS="-O2" CXXFLAGS="-O2 -std=gnu++17" "$src/runConfigureICU" Linux \
+            --disable-tests --disable-samples --disable-extras --disable-icuio && make -j"$JOBS")
+    fi
     # (Host build keeps ICU's default shared libs: static-only MinGW builds name libs libsicu*.a but
     # link the tools with -licu*, which fails. Only the host tools use this build.)
 
@@ -303,7 +309,7 @@ build_icudata() {
     # icudt73l/<item> (an icudt73l_en.dat held items nothing could find).
     local in="$PREFIX/share/icu/$v/icudt73l.dat" out="$PREFIX/share/icu/$v/en/icudt73l.dat"
     local remove="$BUILD/icu-remove.txt"
-    export PATH="$tools/lib:/ucrt64/bin:$PATH"
+    export PATH="$tools/lib:/ucrt64/bin:$PATH" LD_LIBRARY_PATH="$tools/lib:${LD_LIBRARY_PATH:-}"
     "$tools/bin/icupkg" -l "$in" | tr '\r' '\n' | grep . | grep -v -x -F -f <(grep -v '^#' "$DEPS/icu/icu-keep.txt" | grep .) > "$remove"
     rm -f "$out"
     mkdir -p "$(dirname "$out")"
