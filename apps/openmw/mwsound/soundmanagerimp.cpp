@@ -38,9 +38,13 @@
 #include "../mwrender/animation.hpp"
 
 #include "constants.hpp"
+#ifdef OPENMW_PLATFORM_3DS
+#include "../n3ds/sound3ds.hpp"
+#else
 #include "ffmpegdecoder.hpp"
-#include "headcache.hpp"
 #include "openaloutput.hpp"
+#endif
+#include "headcache.hpp"
 #include "sound.hpp"
 #include "soundbuffer.hpp"
 #include "sounddecoder.hpp"
@@ -118,10 +122,17 @@ namespace MWSound
 
         std::unique_ptr<HeadCache> makeHeadCache(const VFS::Manager& vfs)
         {
+#ifdef OPENMW_PLATFORM_3DS
+            // No memory for decoded sound heads, whatever an old settings.cfg says (the 3DS decoder ignores the
+            // cache, and the warm queue would read every music and voice file on a thread).
+            (void)vfs;
+            return nullptr;
+#else
             const std::size_t sizeMb = Settings::sound().mHeadCacheSize;
             if (sizeMb == 0)
                 return nullptr;
             return std::make_unique<HeadCache>(vfs, sizeMb * 1024 * 1024);
+#endif
         }
 
         // Match the playback path's resolution.

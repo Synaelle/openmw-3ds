@@ -5,6 +5,8 @@
 
 #include "../mwworld/ptr.hpp"
 
+#include "../n3ds/menufriend.hpp"
+
 namespace Gui
 {
     class ImageButton;
@@ -14,6 +16,7 @@ namespace MWGui
 {
     class ScrollWindow : public BookWindowBase
     {
+        OMW3DS_MENU_FRIEND
     public:
         ScrollWindow();
 
@@ -35,6 +38,13 @@ namespace MWGui
         bool onControllerButtonEvent(const SDL_ControllerButtonEvent& arg) override;
 
     private:
+#ifdef OPENMW_PLATFORM_3DS
+        // M19: the bottom screen's title and text buttons (packaging/ui3ds/mygui/openmw_scroll.layout). The image
+        // buttons stay hidden.
+        MyGUI::TextBox* mTitle3DS = nullptr;
+        MyGUI::Button* mTake3DS = nullptr;
+        void onScrollButton3DS(MyGUI::Widget* sender);
+#endif
         Gui::ImageButton* mCloseButton;
         Gui::ImageButton* mTakeButton;
         MyGUI::ScrollView* mTextView;

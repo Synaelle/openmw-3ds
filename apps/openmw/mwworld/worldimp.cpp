@@ -1,5 +1,13 @@
 #include "worldimp.hpp"
 
+#ifdef OPENMW_PLATFORM_3DS
+#include <components/files/constrainedfilestreambuf.hpp>
+#include <platform3ds/memprobe.hpp>
+#define OMW3DS_STAGE(label) p3ds::memprobe::stage(label) // timestamped log line (startup profiling)
+#else
+#define OMW3DS_STAGE(label)
+#endif
+
 #include <charconv>
 #include <vector>
 
@@ -227,14 +235,40 @@ namespace MWWorld
         mContentFiles = contentFiles;
         mESMVersions.resize(mContentFiles.size(), -1);
 
+#ifdef OPENMW3DS_DEBUG
+        p3ds::perf::detail::begin(); // how much of the load is SD reads (io.read)
+#endif
         loadContentFiles(fileCollections, contentFiles, encoder, listener);
+#ifdef OPENMW3DS_DEBUG
+        {
+            char detail[300];
+            p3ds::perf::detail::end(detail, sizeof(detail));
+            Log(Debug::Info) << "3ds content files (ms/calls):" << detail;
+            Files::logReadStats("content files");
+        }
+#endif
+        OMW3DS_STAGE("loadData: content files");
         loadGroundcoverFiles(fileCollections, groundcoverFiles, encoder, listener);
         MWBase::Environment::get().getLuaManager()->contentFilesLoaded();
+        OMW3DS_STAGE("loadData: Lua contentFilesLoaded");
 
         fillGlobalVariables();
 
         mStore.setUp();
+        OMW3DS_STAGE("loadData: store setUp");
+#ifdef OPENMW3DS_DEBUG
+        p3ds::perf::detail::begin();
+#endif
         mStore.validateRecords(mReaders);
+#ifdef OPENMW3DS_DEBUG
+        {
+            char detail[300];
+            p3ds::perf::detail::end(detail, sizeof(detail));
+            Log(Debug::Info) << "3ds validate + ref count (ms/calls):" << detail;
+            Files::logReadStats("validate + ref count");
+        }
+#endif
+        OMW3DS_STAGE("loadData: validate + ref count");
         mStore.movePlayerRecord();
 
         mSwimHeightScale = mStore.get<ESM::GameSetting>().find("fSwimHeightScale")->mValue.getFloat();
@@ -2653,8 +2687,16 @@ namespace MWWorld
         if (std::optional<ESM::Position> destPos = searchDoorDestInCell(*cellStore))
         {
             pos = *destPos;
+#ifdef OPENMW_PLATFORM_3DS
+            Log(Debug::Info) << "3ds findInteriorPosition " << name << ": door destination " << pos.pos[0] << ' '
+                             << pos.pos[1] << ' ' << pos.pos[2];
+#endif
             return cellId;
         }
+#ifdef OPENMW_PLATFORM_3DS
+        Log(Debug::Info) << "3ds findInteriorPosition " << name << ": no door destination ("
+                         << cellStore->getReadOnlyDoors().mList.size() << " doors in cell)";
+#endif
         if (std::optional<ESM::Position> destPos = searchMarkerPosition(*cellStore, "xmarkerheading"))
         {
             pos = *destPos;
@@ -2674,6 +2716,11 @@ namespace MWWorld
         {
             pos = statics.begin()->mRef.getPosition();
             pos.rot[0] = pos.rot[1] = pos.rot[2] = 0;
+#ifdef OPENMW_PLATFORM_3DS
+            Log(Debug::Info) << "3ds findInteriorPosition " << name << ": first static "
+                             << statics.begin()->mRef.getRefId() << " at " << pos.pos[0] << ' ' << pos.pos[1] << ' '
+                             << pos.pos[2];
+#endif
             return cellId;
         }
 

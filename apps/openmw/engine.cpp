@@ -89,6 +89,17 @@
 
 #include "profile.hpp"
 
+#ifdef OPENMW_PLATFORM_3DS
+#include <platform3ds/crash.hpp>
+#include <platform3ds/memprobe.hpp>
+#include "n3ds/frame3ds.hpp"
+#define OMW3DS_MEMSTAGE(label) p3ds::memprobe::stage(label)
+#define OMW3DS_PHASE(label) p3ds::perf::Phase omw3dsPhase(label)
+#else
+#define OMW3DS_MEMSTAGE(label)
+#define OMW3DS_PHASE(label)
+#endif
+
 namespace
 {
     void checkSDLError(int ret)
@@ -212,6 +223,10 @@ void OMW::Engine::executeLocalScripts()
 
 bool OMW::Engine::frame(unsigned frameNumber, float frametime)
 {
+#ifdef OPENMW_PLATFORM_3DS
+    p3ds::crash::kick("engine frame"); // feed the hang watchdog
+    omw3ds::onEngineFrame(); // bottom-screen debug display, frame-time log
+#endif
     const osg::Timer* const timer = osg::Timer::instance();
     // Viewer stats times are relative to the viewer start tick, so express it on the clock the subsystems use
     const Misc::FrameClock::time_point statsEpoch = Misc::FrameClock::now()
@@ -227,7 +242,10 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
         // Stop the background GC started at the previous frame's end.
         // Input handling can run Lua (the menu key does), so the state
         // must not be collected from this point on.
-        mLuaWorker->finishGc();
+        {
+            OMW3DS_PHASE("luaFinishGc");
+            mLuaWorker->finishGc();
+        }
 
         // update input
         {
@@ -351,7 +369,10 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
     if (reportResource)
         stats->setAttribute(frameNumber, "UnrefQueue", static_cast<double>(mUnrefQueue->getSize()));
 
-    mUnrefQueue->flush(*mWorkQueue);
+    {
+        OMW3DS_PHASE("unrefFlush");
+        mUnrefQueue->flush(*mWorkQueue);
+    }
 
     if (reportResource)
     {
@@ -377,19 +398,47 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
     // update focus object for GUI
     {
         ScopedProfile<UserStatsType::Focus> profile(statsEpoch, frameNumber, frameStats);
-        mWorld->updateFocusObject();
+#ifdef OPENMW_PLATFORM_3DS
+        // M10: the focus ray walks the scene graph (an intersector cloned at every transform: ~100 allocations a
+        // frame). It only feeds the crosshair's label (activating casts its own ray), so 10 times a second.
+        if (frameNumber % 3 == 0)
+#endif
+            mWorld->updateFocusObject();
     }
 
     // if there is a separate Lua thread, it starts the update now
     mLuaWorker->allowUpdate(statsEpoch, frameNumber, frameStats);
 
-    mViewer->renderingTraversals();
+    {
+        OMW3DS_PHASE("rendering"); // = cull + draw + OSG overhead
+        mViewer->renderingTraversals();
+    }
 
-    mLuaWorker->finishUpdate(statsEpoch, frameNumber, frameStats);
+    {
+        OMW3DS_PHASE("luaUpdate"); // the Lua update itself when "lua num threads = 0"
+        mLuaWorker->finishUpdate(statsEpoch, frameNumber, frameStats);
+    }
 
     // The Lua state is unused until the next frame starts: the worker collects
     // garbage through the frame tail and the framerate-limiter sleep.
-    mLuaWorker->gc();
+    {
+        OMW3DS_PHASE("luaGc");
+#ifdef OPENMW_PLATFORM_3DS
+        // Test #105: a 1.3 s luaGc phase right after the system keyboard. Whether the collector did that much work
+        // (the Lua memory falls) or the main thread didn't run meanwhile (it doesn't).
+        const auto gcStart = std::chrono::steady_clock::now();
+        const uint64_t luaBefore = mLuaManager->getLuaMemoryUsage3DS();
+#endif
+        mLuaWorker->gc();
+#ifdef OPENMW_PLATFORM_3DS
+        const auto gcTime = std::chrono::steady_clock::now() - gcStart;
+        if (gcTime > std::chrono::milliseconds(200))
+            Log(Debug::Warning) << "slow Lua garbage collection step: "
+                                << std::chrono::duration_cast<std::chrono::milliseconds>(gcTime).count()
+                                << " ms, Lua memory " << luaBefore / 1024 << " KB -> "
+                                << mLuaManager->getLuaMemoryUsage3DS() / 1024 << " KB";
+#endif
+    }
 
     return true;
 }
@@ -540,7 +589,12 @@ void OMW::Engine::createWindow()
         posY = SDL_WINDOWPOS_UNDEFINED_DISPLAY(screen);
     }
 
+#ifdef OPENMW_PLATFORM_3DS
+    // No OpenGL: SDL runs its dummy video driver. Rendering goes through citro3d (sdlgraphicswindow_3ds).
+    Uint32 flags = SDL_WINDOW_SHOWN;
+#else
     Uint32 flags = SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+#endif
     if (windowMode == Settings::WindowMode::Fullscreen)
         flags |= SDL_WINDOW_FULLSCREEN;
     else if (windowMode == Settings::WindowMode::WindowedFullscreen)
@@ -767,10 +821,12 @@ void OMW::Engine::prepareEngine()
     mViewer->setSceneData(rootNode);
 
     createWindow();
+    OMW3DS_MEMSTAGE("createWindow");
 
     mVFS = std::make_unique<VFS::Manager>();
 
     VFS::registerArchives(mVFS.get(), mFileCollections, mArchives, true, &mEncoder.get()->getStatelessEncoder());
+    OMW3DS_MEMSTAGE("VFS registerArchives");
 
     mResourceSystem = std::make_unique<Resource::ResourceSystem>(
         mVFS.get(), Settings::cells().mCacheExpiryDelay, &mEncoder.get()->getStatelessEncoder());
@@ -781,6 +837,7 @@ void OMW::Engine::prepareEngine()
         Settings::general().mTextureMinFilter, Settings::general().mTextureMipmap,
         static_cast<float>(Settings::general().mAnisotropy));
     mEnvironment.setResourceSystem(*mResourceSystem);
+    OMW3DS_MEMSTAGE("ResourceSystem");
 
     mWorkQueue = std::make_shared<SceneUtil::WorkQueue>(Settings::cells().mPreloadNumThreads);
     mUnrefQueue = std::make_unique<SceneUtil::UnrefQueue>();
@@ -801,11 +858,18 @@ void OMW::Engine::prepareEngine()
 
     mLuaManager = std::make_unique<MWLua::LuaManager>(mVFS.get(), mResDir / "lua_libs");
     mEnvironment.setLuaManager(*mLuaManager);
+    OMW3DS_MEMSTAGE("LuaManager");
 
     // Create input and UI first to set up a bootstrapping environment for
     // showing a loading screen and keeping the window responsive while doing so
 
+#ifdef OPENMW_PLATFORM_3DS
+    // Its own file: bindings saved by earlier builds hold the upstream controller layout, which the 3DS
+    // controller defaults (bindingsmanager.cpp) would not replace.
+    const auto keybinderUser = mCfgMgr.getUserConfigPath() / "input_3ds_v1.xml";
+#else
     const auto keybinderUser = mCfgMgr.getUserConfigPath() / "input_v3.xml";
+#endif
     bool keybinderUserExists = std::filesystem::exists(keybinderUser);
     if (!keybinderUserExists)
     {
@@ -858,6 +922,7 @@ void OMW::Engine::prepareEngine()
         mWorkQueue, mCfgMgr.getLogPath(), mScriptConsoleMode, mTranslationDataStorage, mEncoding, mExportFonts,
         Version::getOpenmwVersionDescription(), mCfgMgr);
     mEnvironment.setWindowManager(*mWindowManager);
+    OMW3DS_MEMSTAGE("WindowManager");
 
     auto takeScreenshot = [this] {
         mScreenCaptureHandler->setFramesToCapture(1);
@@ -867,15 +932,18 @@ void OMW::Engine::prepareEngine()
         std::make_unique<SDLUtil::InputWrapper>(mWindow, mViewer, mGrab), takeScreenshot, keybinderUser,
         keybinderUserExists, userGameControllerdb, gameControllerdb);
     mEnvironment.setInputManager(*mInputManager);
+    OMW3DS_MEMSTAGE("InputManager");
 
     // Create sound system
     mSoundManager = std::make_unique<MWSound::SoundManager>(mVFS.get(), mUseSound);
     mEnvironment.setSoundManager(*mSoundManager);
+    OMW3DS_MEMSTAGE("SoundManager");
 
     // Create the world
     mWorld = std::make_unique<MWWorld::World>(
         mResourceSystem.get(), mActivationDistanceOverride, mCellName, mCfgMgr.getUserDataPath());
     mEnvironment.setWorld(*mWorld);
+    OMW3DS_MEMSTAGE("World constructed");
     mEnvironment.setWorldModel(mWorld->getWorldModel());
     mEnvironment.setESMStore(mWorld->getStore());
 
@@ -920,6 +988,7 @@ void OMW::Engine::prepareEngine()
     mLuaManager->loadPermanentStorage(mCfgMgr.getUserConfigPath());
     mLuaManager->initPreLoad();
 
+    OMW3DS_MEMSTAGE("before loadData");
     Loading::Listener* listener = MWBase::Environment::get().getWindowManager()->getLoadingScreen();
     Loading::AsyncListener asyncListener(*listener);
     auto dataLoading = std::async(std::launch::async,
@@ -936,18 +1005,31 @@ void OMW::Engine::prepareEngine()
     {
         using namespace std::chrono_literals;
         while (dataLoading.wait_for(50ms) != std::future_status::ready)
+        {
             asyncListener.update();
+#ifdef OPENMW_PLATFORM_3DS
+            omw3ds::onLoadingTick(); // HOME button, bottom screen (the loading screen may not redraw)
+#endif
+        }
         dataLoading.get();
     }
+    OMW3DS_MEMSTAGE("after loadData (main thread)");
     mSoundManager->warmStoreSounds();
     listener->loadingOff();
 
     mWorld->init(mMaxRecastLogLevel, mViewer, std::move(rootNode), mWorkQueue, *mUnrefQueue);
+    OMW3DS_MEMSTAGE("World::init");
+#ifdef OPENMW_PLATFORM_3DS
+    p3ds::memprobe::callerProfileStart(true); // diagnostic: who allocates from here to the first frame
+#endif
     mEnvironment.setWorldScene(mWorld->getWorldScene());
     mWorld->setupPlayer();
+    OMW3DS_MEMSTAGE("setupPlayer");
     mWorld->setRandomSeed(mRandomSeed);
     mWindowManager->initUI();
+    OMW3DS_MEMSTAGE("initUI");
     mLuaManager->initPostLoad();
+    OMW3DS_MEMSTAGE("Lua initPostLoad");
 
     // scripts
     if (mCompileAll)
@@ -998,6 +1080,9 @@ void OMW::Engine::go()
 
     // Do not try to outsmart the OS thread scheduler (see bug #4785).
     mViewer->setUseConfigureAffinity(false);
+#ifdef OPENMW_PLATFORM_3DS
+    omw3ds::setViewer(mViewer); // per-subsystem frame timings in the perf log
+#endif
 
     mEnvironment.setFrameRateLimit(Settings::video().mFramerateLimit);
 
@@ -1058,7 +1143,12 @@ void OMW::Engine::go()
     }
     else
     {
+        OMW3DS_MEMSTAGE("before newGame");
+#ifdef OPENMW_PLATFORM_3DS
+        p3ds::memprobe::callerProfileStop("World::init to newGame, all threads");
+#endif
         mStateManager->newGame(!mNewGame);
+        OMW3DS_MEMSTAGE("after newGame");
     }
 
     if (!mStartupScript.empty() && mStateManager->getState() == MWState::StateManager::State_Running)
@@ -1081,7 +1171,12 @@ void OMW::Engine::go()
 
         const unsigned frameNumber = mViewer->getFrameStamp()->getFrameNumber();
 
-        if (!frame(frameNumber, static_cast<float>(dt)))
+        bool frameDone;
+        {
+            OMW3DS_PHASE("engineFrame"); // all of Engine::frame
+            frameDone = frame(frameNumber, static_cast<float>(dt));
+        }
+        if (!frameDone)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
@@ -1108,7 +1203,25 @@ void OMW::Engine::go()
             }
         }
 
-        frameRateLimiter.limit();
+        {
+            OMW3DS_PHASE("limiter");
+#ifdef OPENMW_PLATFORM_3DS
+            // Test #105: 1.3 s in the limiter, which sleeps at most one frame: the main thread wasn't woken up
+            // (another thread or the system kept its core). The log says how long it asked for.
+            const auto limitStart = std::chrono::steady_clock::now();
+            const auto asked = frameRateLimiter.timeLeft3DS(limitStart);
+#endif
+            frameRateLimiter.limit();
+#ifdef OPENMW_PLATFORM_3DS
+            const auto slept = std::chrono::steady_clock::now() - limitStart;
+            if (slept > std::chrono::milliseconds(200))
+                Log(Debug::Warning) << "frame limiter: asked to sleep "
+                                    << std::chrono::duration_cast<std::chrono::milliseconds>(asked).count()
+                                    << " ms, woke up after "
+                                    << std::chrono::duration_cast<std::chrono::milliseconds>(slept).count()
+                                    << " ms (the main thread wasn't running)";
+#endif
+        }
     }
 
     mLuaWorker->join();
@@ -1117,6 +1230,10 @@ void OMW::Engine::go()
     Settings::Manager::saveUser(mCfgMgr.getUserConfigPath() / "settings.cfg");
     Settings::ShaderManager::get().save();
     mLuaManager->savePermanentStorage(mCfgMgr.getUserConfigPath());
+#ifdef OPENMW_PLATFORM_3DS
+    MWBase::Environment::get().getInputManager()->saveBindings(); // as ~BindingsManager would
+    omw3ds::exitProcess(0);
+#endif
 }
 
 void OMW::Engine::setCompileAll(bool all)

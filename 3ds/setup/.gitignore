@@ -1,0 +1,8 @@
+/build/
+/build-release/
+/out/
+/target/
+/dist/
+/stage/
+/app/port/
+/app/gen/

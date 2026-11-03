@@ -14,6 +14,10 @@
 #include "../mwbase/inputmanager.hpp"
 #include "../mwbase/windowmanager.hpp"
 
+#ifdef OPENMW_PLATFORM_3DS
+#include <platform3ds/log.hpp>
+#endif
+
 namespace MWGui
 {
 
@@ -100,6 +104,10 @@ namespace MWGui
         box->mCurrentTime = 0;
         auto realMessage = MyGUI::LanguageManager::getInstance().replaceTags({ message.data(), message.size() });
         box->mMaxTime = realMessage.length() * mMessageBoxSpeed;
+#ifdef OPENMW_PLATFORM_3DS
+        // No GUI drawing yet: show game messages in the bottom-screen log.
+        P3DS_LOGI("message: %s", realMessage.asUTF8_c_str());
+#endif
 
         if (stat)
             mStaticMessageBox = box.get();
@@ -136,6 +144,16 @@ namespace MWGui
             mInterMessageBoxe->setVisible(false);
         }
 
+#ifdef OPENMW_PLATFORM_3DS
+        {
+            std::string text = MyGUI::LanguageManager::getInstance()
+                                   .replaceTags({ message.data(), message.size() })
+                                   .asUTF8();
+            for (const std::string& button : buttons)
+                text += " [" + MyGUI::LanguageManager::getInstance().replaceTags(button).asUTF8() + "]";
+            P3DS_LOGW("question: %s", text.c_str());
+        }
+#endif
         mInterMessageBoxe
             = std::make_unique<InteractiveMessageBox>(*this, std::string{ message }, buttons, immediate, defaultFocus);
         mLastButtonPressed = -1;
@@ -203,6 +221,11 @@ namespace MWGui
         MyGUI::IntPoint pos;
         pos.left = (gameWindowSize.width - mMainWidget->getWidth()) / 2;
         pos.top = (gameWindowSize.height - mMainWidget->getHeight() - height - mBottomPadding);
+#ifdef OPENMW_PLATFORM_3DS
+        // The bottom of the top screen, over the game as in Morrowind (M17: on the bottom screen they covered the
+        // pages and the button hints).
+        pos.top = gameWindowSize.height / 2 - mMainWidget->getHeight() - height - 8;
+#endif
 
         mMainWidget->setPosition(pos);
     }
@@ -241,7 +264,11 @@ namespace MWGui
         getWidget(mMessageWidget, "message");
         getWidget(mButtonsWidget, "buttons");
 
+#ifdef OPENMW_PLATFORM_3DS
+        mMessageWidget->setSize(300, mMessageWidget->getHeight()); // the bottom screen is 320 wide
+#else
         mMessageWidget->setSize(400, mMessageWidget->getHeight());
+#endif
         mMessageWidget->setCaptionWithReplacing(message);
 
         MyGUI::IntSize textSize = mMessageWidget->getTextSize();
@@ -313,6 +340,9 @@ namespace MWGui
             MyGUI::IntPoint absPos;
             absPos.left = (gameWindowSize.width - realSize.width) / 2;
             absPos.top = (gameWindowSize.height - realSize.height) / 2;
+#ifdef OPENMW_PLATFORM_3DS
+            absPos.top = gameWindowSize.height / 2 + (gameWindowSize.height / 2 - realSize.height) / 2; // bottom screen
+#endif
 
             mMainWidget->setPosition(absPos);
             mMainWidget->setSize(realSize);
@@ -382,6 +412,9 @@ namespace MWGui
             MyGUI::IntPoint absPos;
             absPos.left = (gameWindowSize.width - mainWidgetSize.width) / 2;
             absPos.top = (gameWindowSize.height - mainWidgetSize.height) / 2;
+#ifdef OPENMW_PLATFORM_3DS
+            absPos.top = gameWindowSize.height / 2 + (gameWindowSize.height / 2 - mainWidgetSize.height) / 2;
+#endif
 
             mMainWidget->setPosition(absPos);
 

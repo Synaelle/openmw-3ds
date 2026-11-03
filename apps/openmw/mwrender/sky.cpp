@@ -41,6 +41,15 @@
 
 namespace
 {
+#ifdef OPENMW_PLATFORM_3DS
+    // A third of upstream's raindrops: ~2000 drops alive -> ~650, vanilla's own "Max Raindrops" for rain. In
+    // Azahar the rain cost ~4 ms of particle updates (in the cull traversal) and several ms building its quads
+    // per frame, out of ~48.
+    constexpr float sRainDensity = 1.f / 3.f;
+#else
+    constexpr float sRainDensity = 1.f;
+#endif
+
     class WrapAroundOperator : public osgParticle::Operator
     {
     public:
@@ -378,6 +387,11 @@ namespace MWRender
         mRainNode = new osg::Group;
 
         mRainParticleSystem = new NifOsg::ParticleSystem;
+#ifdef OPENMW_PLATFORM_3DS
+        // The 3DS backend draws these drops about a pixel wide and fades those near the eye (render3ds backend.cpp
+        // buildParticles: rain was the GPU's worst case, 27.5 ms in test #95's benchmark).
+        mRainParticleSystem->setName("Rain3DS");
+#endif
         osg::Vec3 rainRange = osg::Vec3(mRainDiameter, mRainDiameter, (mRainMinHeight + mRainMaxHeight) / 2.f);
 
         mRainParticleSystem->setParticleAlignment(osgParticle::ParticleSystem::FIXED);
@@ -395,7 +409,17 @@ namespace MWRender
 
         stateset->setTextureAttribute(0, raindropTex);
         stateset->setNestRenderBins(false);
+#ifdef OPENMW_PLATFORM_3DS
+        // After the water (and every other depth-sorted drawable), without writing depth. Sorted with the water,
+        // the eye-following water plane and the camera-following rain swapped places with the view, and drops
+        // drawn first kept the water from covering what lies under it: dark streaks over water (hardware test #22).
+        stateset->setRenderBinDetails(RenderBin_DepthSorted + 1, "RenderBin");
+        osg::ref_ptr<osg::Depth> rainDepth = new SceneUtil::AutoDepth;
+        rainDepth->setWriteMask(false);
+        stateset->setAttributeAndModes(rainDepth);
+#else
         stateset->setRenderingHint(osg::StateSet::TRANSPARENT_BIN);
+#endif
         stateset->setMode(GL_CULL_FACE, osg::StateAttribute::OFF);
         stateset->setMode(GL_BLEND, osg::StateAttribute::ON);
 
@@ -425,7 +449,7 @@ namespace MWRender
         // (near 1-2). Since the rain is a regular geometry, it produces water ripples, also in theory it can be removed
         // if collides with something.
         osg::ref_ptr<RainCounter> counter = new RainCounter;
-        counter->setNumberOfParticlesPerSecondToCreate(mRainMaxRaindrops / mRainEntranceSpeed * 20);
+        counter->setNumberOfParticlesPerSecondToCreate(mRainMaxRaindrops / mRainEntranceSpeed * 20 * sRainDensity);
         emitter->setCounter(counter);
         mCounter = counter;
 
@@ -616,7 +640,8 @@ namespace MWRender
             mPlacer->setYRange(-rainRange.y() / 2, rainRange.y() / 2);
             mPlacer->setZRange(-rainRange.z() / 2, rainRange.z() / 2);
 
-            mCounter->setNumberOfParticlesPerSecondToCreate(mRainMaxRaindrops / mRainEntranceSpeed * 20);
+            mCounter->setNumberOfParticlesPerSecondToCreate(
+                mRainMaxRaindrops / mRainEntranceSpeed * 20 * sRainDensity);
             mPrecipitationOccluder->updateRange(rainRange);
         }
     }
@@ -734,6 +759,12 @@ namespace MWRender
                     }
 
                     ps->setUserValue("simpleLighting", true);
+#ifdef OPENMW_PLATFORM_3DS
+                    // Ash and blight clouds fade near the eye on the 3DS (a cloud next to the camera blends over
+                    // most of the screen: render3ds backend.cpp buildParticles). Snowflakes stay.
+                    if (mCurrentParticleEffect != Settings::models().mWeathersnow.get())
+                        ps->setName("Storm3DS");
+#endif
 
                     if (occlusionEnabledForEffect)
                         ps->setUserValue("particleOcclusion", true);

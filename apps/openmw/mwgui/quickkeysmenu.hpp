@@ -11,6 +11,8 @@
 #include "spellmodel.hpp"
 #include "windowbase.hpp"
 
+#include "../n3ds/menufriend.hpp"
+
 namespace MWGui
 {
 
@@ -21,6 +23,8 @@ namespace MWGui
 
     class QuickKeysMenu : public WindowBase
     {
+        OMW3DS_HUD_FRIEND
+
     public:
         QuickKeysMenu();
 
@@ -79,6 +83,11 @@ namespace MWGui
 
         bool onControllerButtonEvent(const SDL_ControllerButtonEvent& arg) override;
         size_t mControllerFocus = 0;
+#ifdef OPENMW_PLATFORM_3DS
+        // M19: under the slots, "N: name" of the slot the D-pad (or the last tap) is on.
+        MyGUI::TextBox* mNameLabel3DS = nullptr;
+        void updateName3DS();
+#endif
     };
 
     class QuickKeysMenuAssign : public WindowModal

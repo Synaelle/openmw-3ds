@@ -1,5 +1,15 @@
 #include "myguirendermanager.hpp"
 
+#include <cstring>
+#include <map>
+#include <string>
+#include <vector>
+
+#include <components/debug/debuglog.hpp>
+
+#include <MyGUI_LayerManager.h>
+#include <MyGUI_OverlappedLayer.h>
+#include <MyGUI_SharedLayer.h>
 #include <MyGUI_Timer.h>
 
 #include <osg/Drawable>
@@ -14,6 +24,12 @@
 #include <components/shader/shadermanager.hpp>
 
 #include "myguitexture.hpp"
+#ifdef OPENMW_PLATFORM_3DS
+#include <osg/BlendFunc>
+
+#include <components/render3ds/render3ds.hpp>
+#include <platform3ds/memprobe.hpp> // p3ds::perf::Phase (frame breakdown)
+#endif
 
 #define MYGUI_PLATFORM_LOG_SECTION "Platform"
 #define MYGUI_PLATFORM_LOG(level, text) MYGUI_LOGGING(MYGUI_PLATFORM_LOG_SECTION, level, text)
@@ -220,6 +236,11 @@ namespace MyGUIPlatform
             mBatchVector[mWriteTo].clear();
         }
 
+#ifdef OPENMW_PLATFORM_3DS
+        // The 3DS backend doesn't draw the GUI camera's stage: it reads the batches collected in this frame's cull.
+        const std::vector<Batch>& collectedBatches() const { return mBatchVector[mWriteTo]; }
+#endif
+
         osg::StateSet* getDrawableStateSet() { return mStateSet; }
 
         META_Object(osgMyGUI, Drawable)
@@ -237,6 +258,44 @@ namespace MyGUIPlatform
         osg::ref_ptr<osg::Texture2D> mDummyTexture;
     };
 
+#ifdef OPENMW_PLATFORM_3DS
+    namespace
+    {
+        const Drawable* sDrawable3DS = nullptr;
+
+        Render3DS::GuiBlend blendOf(const osg::StateSet* stateSet)
+        {
+            const auto* blendFunc = stateSet != nullptr
+                ? static_cast<const osg::BlendFunc*>(stateSet->getAttribute(osg::StateAttribute::BLENDFUNC))
+                : nullptr;
+            if (blendFunc == nullptr)
+                return Render3DS::GuiBlend::Alpha;
+            if (blendFunc->getDestination() == osg::BlendFunc::ONE)
+                return Render3DS::GuiBlend::Additive;
+            if (blendFunc->getSource() == osg::BlendFunc::ONE)
+                return Render3DS::GuiBlend::Premultiplied;
+            return Render3DS::GuiBlend::Alpha;
+        }
+
+        void forEachGuiBatch(Render3DS::GuiBatchSink sink)
+        {
+            if (sDrawable3DS == nullptr)
+                return;
+            for (const Drawable::Batch& batch : sDrawable3DS->collectedBatches())
+            {
+                if (batch.mVertexCount == 0 || batch.mArray == nullptr || batch.mArray->getNumElements() == 0)
+                    continue;
+                Render3DS::GuiBatch out;
+                out.mTexture = batch.mTexture.get();
+                out.mVertices = batch.mArray->getDataPointer();
+                out.mCount = static_cast<uint32_t>(batch.mVertexCount);
+                out.mBlend = blendOf(batch.mStateSet.get());
+                sink(out);
+            }
+        }
+    }
+#endif
+
     class OSGVertexBuffer : public MyGUI::IVertexBuffer
     {
         osg::ref_ptr<osg::VertexBufferObject> mBuffer[2];
@@ -249,10 +308,24 @@ namespace MyGUIPlatform
 
         void destroy();
         osg::UByteArray* create();
+        osg::UByteArray* create(size_t bytes);
+
+#ifdef OPENMW_PLATFORM_3DS
+        // MyGUI sizes a render item's buffer for all of its draw items, visible or not, so every hidden
+        // window of OpenMW's UI costs vertex memory (~11 MB, double-buffered, once each layer has been
+        // drawn). Instead, MyGUI writes into one shared scratch buffer and commit() keeps only the
+        // vertices actually produced. lock/unlock/doRender run back to back for one render item.
+        static std::vector<MyGUI::Vertex> sScratch;
+        bool mPending = false; // scratch holds vertices for this buffer, not committed yet
+#endif
 
     public:
         OSGVertexBuffer();
         virtual ~OSGVertexBuffer() {}
+
+#ifdef OPENMW_PLATFORM_3DS
+        void commit(size_t vertexCount);
+#endif
 
         void markUsed();
 
@@ -291,8 +364,40 @@ namespace MyGUIPlatform
         return mNeedVertexCount;
     }
 
+#ifdef OPENMW_PLATFORM_3DS
+    std::vector<MyGUI::Vertex> OSGVertexBuffer::sScratch;
+
+    void OSGVertexBuffer::commit(size_t vertexCount)
+    {
+        if (!mPending)
+            return; // not re-locked since the last commit: the current array already holds the vertices
+        mPending = false;
+        if (mUsed)
+        {
+            mCurrentBuffer = (mCurrentBuffer + 1) % 2;
+            mUsed = false;
+        }
+        const size_t bytes = vertexCount * sizeof(MyGUI::Vertex);
+        osg::UByteArray* array = mVertexArray[mCurrentBuffer];
+        if (!array)
+            array = create(bytes);
+        else if (array->size() != bytes)
+            array->resize(bytes);
+        if (bytes != 0)
+            std::memcpy(&(*array)[0], sScratch.data(), bytes);
+        mVertexArray[mCurrentBuffer]->dirty();
+        mBuffer[mCurrentBuffer]->dirty();
+    }
+#endif
+
     MyGUI::Vertex* OSGVertexBuffer::lock()
     {
+#ifdef OPENMW_PLATFORM_3DS
+        if (sScratch.size() < mNeedVertexCount)
+            sScratch.resize(mNeedVertexCount);
+        mPending = true;
+        return sScratch.data();
+#endif
         if (mUsed)
         {
             mCurrentBuffer = (mCurrentBuffer + 1) % 2;
@@ -313,14 +418,21 @@ namespace MyGUIPlatform
 
     void OSGVertexBuffer::unlock()
     {
+#ifdef OPENMW_PLATFORM_3DS
+        return; // commit() does it
+#endif
         mVertexArray[mCurrentBuffer]->dirty();
         mBuffer[mCurrentBuffer]->dirty();
     }
 
     osg::UByteArray* OSGVertexBuffer::create()
     {
-        mVertexArray[mCurrentBuffer]
-            = new osg::UByteArray(static_cast<unsigned int>(mNeedVertexCount * sizeof(MyGUI::Vertex)));
+        return create(mNeedVertexCount * sizeof(MyGUI::Vertex));
+    }
+
+    osg::UByteArray* OSGVertexBuffer::create(size_t bytes)
+    {
+        mVertexArray[mCurrentBuffer] = new osg::UByteArray(static_cast<unsigned int>(bytes));
 
         mBuffer[mCurrentBuffer] = new osg::VertexBufferObject;
         mBuffer[mCurrentBuffer]->setDataVariance(osg::Object::DYNAMIC);
@@ -361,6 +473,10 @@ namespace MyGUIPlatform
     {
         MYGUI_PLATFORM_LOG(Info, "* Shutdown: " << getClassTypeName());
 
+#ifdef OPENMW_PLATFORM_3DS
+        Render3DS::setGuiSource(nullptr);
+        sDrawable3DS = nullptr;
+#endif
         if (mGuiRoot.valid())
             mSceneRoot->removeChild(mGuiRoot.get());
         mGuiRoot = nullptr;
@@ -394,6 +510,10 @@ namespace MyGUIPlatform
 
         mGuiRoot = camera;
         mSceneRoot->addChild(mGuiRoot.get());
+#ifdef OPENMW_PLATFORM_3DS
+        sDrawable3DS = mDrawable.get();
+        Render3DS::setGuiSource(&forEachGuiBatch);
+#endif
 
         osg::ref_ptr<osg::Viewport> vp = mViewer->getCamera()->getViewport();
         setViewSize(static_cast<int>(vp->width()), static_cast<int>(vp->height()));
@@ -437,6 +557,9 @@ namespace MyGUIPlatform
     {
         Drawable::Batch batch;
         batch.mVertexCount = count;
+#ifdef OPENMW_PLATFORM_3DS
+        static_cast<OSGVertexBuffer*>(buffer)->commit(count);
+#endif
         batch.mVertexBuffer = static_cast<OSGVertexBuffer*>(buffer)->getVertexBuffer();
         batch.mArray = static_cast<OSGVertexBuffer*>(buffer)->getVertexArray();
         static_cast<OSGVertexBuffer*>(buffer)->markUsed();
@@ -476,15 +599,111 @@ namespace MyGUIPlatform
 
     void RenderManager::collectDrawCalls()
     {
+#ifdef OPENMW_PLATFORM_3DS
+        // MyGUI isn't drawn yet on the 3DS: building its batches cost ~2.6 ms of cull per frame on hardware.
+        if (!Render3DS::drawsGui())
+            return;
+        p3ds::perf::Phase phase("guiCull"); // MyGUI layout -> batches, in the cull traversal
+        // M10: nothing to lay out again when no layer is out of date (MyGUI marks a layer when a widget moves,
+        // shows, hides or changes its text, colour or image): last frame's batches still describe the interface,
+        // and the backend sees them unchanged (its own fast path). ~2.8 ms a frame on the console (test #71).
+        {
+            static bool collected = false;
+            static unsigned calls = 0, lastLayout = 0; // frames (collections asked), the last one laid out
+            ++calls;
+            bool outOfDate = mUpdate || !collected;
+            MyGUI::LayerManager::EnumeratorLayer layers = MyGUI::LayerManager::getInstance().getEnumerator();
+            while (!outOfDate && layers.next())
+            {
+                MyGUI::ILayer* layer = layers.current();
+                if (auto* overlapped = dynamic_cast<MyGUI::OverlappedLayer*>(layer))
+                    outOfDate = overlapped->isOutOfDate();
+                else if (auto* shared = dynamic_cast<MyGUI::SharedLayer*>(layer))
+                {
+                    // An empty shared layer has no node to ask (MyGUI's isOutOfDate() would dereference it): it
+                    // draws nothing, so only losing or gaining its node is a change.
+                    static std::map<const MyGUI::ILayer*, size_t> nodeCounts;
+                    const size_t nodes = shared->getLayerNodeCount();
+                    auto [known, added] = nodeCounts.emplace(layer, nodes);
+                    outOfDate = added || known->second != nodes || (nodes != 0 && shared->isOutOfDate());
+                    known->second = nodes;
+                }
+                else
+                    outOfDate = true; // a layer type that can't tell
+#ifdef OPENMW3DS_DEBUG
+                // Which layer keeps the interface from being skipped (logged every 150 collections).
+                if (outOfDate)
+                {
+                    static std::map<std::string, int> counts;
+                    static int total = 0;
+                    ++counts[layer->getName()];
+                    if (++total % 150 == 0)
+                    {
+                        std::string line;
+                        for (const auto& [name, count] : counts)
+                            line += " " + name + "=" + std::to_string(count);
+                        Log(Debug::Info) << "3ds gui out of date:" << line;
+                        counts.clear();
+                    }
+                }
+#endif
+            }
+            if (!outOfDate)
+                return;
+            // M10: with only the HUD up, its changes (the minimap's steps, the compass, the bars while running:
+            // ~40% of frames while walking, each a layout, a fingerprint and a redraw) show at most every 3rd frame
+            // (10 a second). Menus and pages keep every frame. The layers stay out of date, so the next allowed
+            // frame lays everything out.
+            if (collected && !mUpdate && Render3DS::hudOnly() && calls - lastLayout < 3)
+                return;
+            lastLayout = calls;
+            collected = true;
+        }
+#endif
+#if defined(OPENMW_PLATFORM_3DS) && defined(OPENMW3DS_DEBUG)
+        // The Seyda Neen freeze (tests #99-#102: 0.8-2.4 s once in the first stage, #102's spike report put 1285 of
+        // its 1317 ms in this pass): a slow pass logs what it spent its time on (SD reads, images, models: the
+        // detail scopes) and names the resources it loaded (cache misses). Not inside another capture (a load).
+        const bool capture = !p3ds::perf::detail::active();
+        const uint64_t captureStart = p3ds::memprobe::ticks();
+        if (capture)
+        {
+            p3ds::perf::detail::begin();
+            p3ds::perf::detail::setLogMisses(true);
+        }
+#endif
         begin();
         onRenderToTarget(this, mUpdate);
         end();
+#if defined(OPENMW_PLATFORM_3DS) && defined(OPENMW3DS_DEBUG)
+        if (capture)
+        {
+            p3ds::perf::detail::setLogMisses(false);
+            char detail[256];
+            p3ds::perf::detail::end(detail, sizeof(detail));
+            const double ms = double(p3ds::memprobe::ticks() - captureStart) * 1000.0 / 268111856.0; // ARM11 ticks
+            if (ms >= 200.0)
+                Log(Debug::Warning) << "3ds slow gui pass: " << static_cast<int>(ms) << " ms;"
+                                    << (detail[0] != '\0' ? detail : " nothing timed (layout or text)");
+        }
+#endif
+#ifdef OPENMW_PLATFORM_3DS
+        Render3DS::noteGuiCollected();
+#endif
 
         mUpdate = false;
     }
 
     void RenderManager::setViewSize(int width, int height)
     {
+#ifdef OPENMW_PLATFORM_3DS
+        // One canvas for both screens (Render3DS::kGuiCanvas*), whatever the window says.
+        if (Render3DS::drawsGui())
+        {
+            width = Render3DS::kGuiCanvasWidth;
+            height = Render3DS::kGuiCanvasHeight;
+        }
+#endif
         if (width < 1)
             width = 1;
         if (height < 1)
@@ -514,6 +733,18 @@ namespace MyGUIPlatform
     {
         const auto it = mTextures.insert_or_assign(name, OSGTexture(name, mImageManager)).first;
         return &it->second;
+    }
+
+    MyGUI::ITexture* RenderManager::createTextureFor(
+        const std::string& name, osg::Texture2D* texture, int width, int height)
+    {
+        const auto it = mTextures.insert_or_assign(name, OSGTexture(name, texture, width, height)).first;
+        return &it->second;
+    }
+
+    bool RenderManager::hasTexture(const std::string& name) const
+    {
+        return mTextures.count(name) != 0;
     }
 
     void RenderManager::destroyTexture(MyGUI::ITexture* texture)

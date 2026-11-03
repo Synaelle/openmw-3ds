@@ -47,7 +47,11 @@ namespace MWGui
 
     private:
         void fitToText(MyGUI::TextBox* widget);
+#ifdef OPENMW_PLATFORM_3DS
+        void layout3DS();
+#endif
         void layoutVertically(MyGUI::Widget* widget, int margin);
+        void moveControllerFocus(int delta);
         MyGUI::Widget* mTextBox;
         MyGUI::TextBox* mText;
         MyGUI::Widget* mButtonBar;
@@ -335,6 +339,7 @@ namespace MWGui
 
     private:
         MyGUI::EditBox* mEditName;
+        void onNameClicked(MyGUI::Widget* sender); // 3DS: the name typed on the system keyboard
         MyGUI::TextBox* mSpecializationName;
         std::vector<MyGUI::Button*> mButtons;
         Widgets::MWAttributePtr mFavoriteAttribute0, mFavoriteAttribute1;

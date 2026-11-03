@@ -13,6 +13,9 @@
 #include <components/shader/shadermanager.hpp>
 
 #include "memorybarrier.hpp"
+#ifdef OPENMW_PLATFORM_3DS
+#include <platform3ds/memprobe.hpp> // p3ds::perf::Phase (frame breakdown)
+#endif
 
 namespace
 {
@@ -504,6 +507,12 @@ namespace SceneUtil
         mLights.clear();
         mLightsInViewSpace.clear();
         mLightListStateSets.clear();
+#ifdef OPENMW_PLATFORM_3DS
+        // Combinations not used for 300 frames are dropped (lights of unloaded cells, ones out of reach).
+        if (frameNum % 300 == 0)
+            for (auto it = mPersistentLightLists.begin(); it != mPersistentLightLists.end();)
+                it = it->second.mFrame + 300 < frameNum ? mPersistentLightLists.erase(it) : std::next(it);
+#endif
     }
 
     void LightManager::addLight(LightSource* lightSource, const osg::Matrixf& worldMat, size_t frameNum)
@@ -535,6 +544,30 @@ namespace SceneUtil
         for (const LightSourceViewBound* light : lightList)
             lightIds.push_back(light->mLightSource->getId());
 
+#ifdef OPENMW_PLATFORM_3DS
+        {
+            PersistentLightList& kept = mPersistentLightLists[lightIds];
+            // A second view in the same frame (another camera) gets its own state set, as before.
+            if (kept.mStateSet == nullptr || kept.mFrame != frameNum || kept.mView == viewMatrix)
+            {
+                if (kept.mStateSet == nullptr)
+                {
+                    kept.mStateSet = new osg::StateSet;
+                    kept.mData = generateLightBufferUniform();
+                    kept.mStateSet->addUniform(kept.mData);
+                    kept.mStateSet->addUniform(new osg::Uniform("PointLightCount", static_cast<int>(lightList.size())));
+                }
+                if (kept.mFrame != frameNum)
+                {
+                    fillLightListUniform(*kept.mData, lightList, frameNum, viewMatrix);
+                    kept.mFrame = frameNum;
+                    kept.mView = viewMatrix;
+                }
+                return kept.mStateSet;
+            }
+        }
+#endif
+
         auto [found, inserted] = mLightListStateSets.try_emplace(std::make_pair(viewMatrix, std::move(lightIds)));
         if (!inserted)
             return found->second;
@@ -563,6 +596,26 @@ namespace SceneUtil
         found->second = stateset;
         return stateset;
     }
+
+#ifdef OPENMW_PLATFORM_3DS
+    void LightManager::fillLightListUniform(
+        osg::Uniform& data, const LightList& lightList, size_t frameNum, const osg::RefMatrix* viewMatrix)
+    {
+        // As getLightListStateSet's own loop below.
+        for (size_t i = 0; i < lightList.size(); ++i)
+        {
+            auto* light = lightList[i]->mLightSource->getLight(frameNum);
+            osg::Matrixf lightMat;
+            configurePosition(lightMat, light->getPosition() * (*viewMatrix));
+            configureAmbient(lightMat, light->getAmbient());
+            configureDiffuse(lightMat, light->getDiffuse());
+            configureSpecular(lightMat, light->getSpecular());
+            configureAttenuation(lightMat, light->getConstantAttenuation(), light->getLinearAttenuation(),
+                light->getQuadraticAttenuation(), lightList[i]->mLightSource->getRadius() * mPointLightRadiusMultiplier);
+            data.setElement(static_cast<unsigned int>(i), lightMat);
+        }
+    }
+#endif
 
     const std::vector<LightManager::LightSourceViewBound>& LightManager::getLightsInViewSpace(
         osgUtil::CullVisitor* cv, const osg::RefMatrix* viewMatrix, size_t frameNum)
@@ -683,6 +736,9 @@ namespace SceneUtil
 
     bool LightListCallback::pushLightState(osg::Node* node, osgUtil::CullVisitor* cv)
     {
+#ifdef OPENMW_PLATFORM_3DS
+        p3ds::perf::Phase phase("lights"); // per-object light lists, in the cull traversal
+#endif
         if (!mLightManager)
         {
             mLightManager = findLightManager(cv->getNodePath());
@@ -738,7 +794,15 @@ namespace SceneUtil
 
             const size_t maxLights = mLightManager->getMaxLights();
 
+#ifdef OPENMW_PLATFORM_3DS
+            // The 3DS draws an object with its first 4 lights (an NPC with its first one): render3ds backend, perf
+            // batch 2. Unsorted, the list is in the order the lights were found while culling, which changes with the
+            // camera: candles and lanterns lit things or not as the view turned, and rooms came out darker (test #105,
+            // Zeste, test #98 against #106). Always sorted, the first ones are the ones that matter most.
+            if (mLightList.size() > 1)
+#else
             if (mLightList.size() > maxLights)
+#endif
             {
                 // Sort by proximity to object: prefer closer lights with larger radius
                 std::sort(mLightList.begin(), mLightList.end(),
@@ -750,7 +814,8 @@ namespace SceneUtil
                         return left->mViewBound.radius() * rightDist > right->mViewBound.radius() * leftDist;
                     });
 
-                mLightList.resize(maxLights);
+                if (mLightList.size() > maxLights)
+                    mLightList.resize(maxLights);
             }
         }
 

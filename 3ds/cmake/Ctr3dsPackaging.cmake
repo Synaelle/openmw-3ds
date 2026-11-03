@@ -1,0 +1,94 @@
+# Packaging helpers: .3dsx (via devkitPro's ctr_create_3dsx) and .cia (bannertool + makerom).
+# makerom/bannertool are fetched into .tools/bin by scripts/bootstrap.ps1.
+
+# Paths are relative to this file: the module is used both by the repo superbuild and by openmw/.
+get_filename_component(_omw3ds_root "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+find_program(OMW3DS_MAKEROM makerom HINTS "${_omw3ds_root}/.tools/bin")
+find_program(OMW3DS_BANNERTOOL bannertool HINTS "${_omw3ds_root}/.tools/bin")
+
+set(OMW3DS_PACKAGING_DIR "${_omw3ds_root}/packaging")
+
+# omw3ds_package(<elf target>
+#     TITLE <name> DESCRIPTION <text> AUTHOR <text>
+#     PRODUCT_CODE <CTR-P-XXXX> UNIQUE_ID <0xFxxxx>
+#     [SYSTEM_MODE_EXT 124MB|178MB] [ICON <png>] [BANNER <png>])
+# ICON and BANNER replace packaging/icon.png and the banner (a flat image then, no 3D emblem): the test title's.
+# Produces <target>.3dsx always and <target>.cia when makerom/bannertool are available.
+function(omw3ds_package target)
+    cmake_parse_arguments(PARSE_ARGV 1 P "" "TITLE;DESCRIPTION;AUTHOR;PRODUCT_CODE;UNIQUE_ID;SYSTEM_MODE_EXT;VERSION;ICON;BANNER" "")
+    if(NOT P_SYSTEM_MODE_EXT)
+        set(P_SYSTEM_MODE_EXT 178MB)
+    endif()
+    # The title's version (FBI and the system's data management show it): major.minor.micro packed as the 3DS does,
+    # major << 10 | minor << 4 | micro. A test build (0.1.0-dev113) gets the version it leads to (0.1.0).
+    set(title_version 0)
+    set(title_version_text "0.0.0")
+    if(P_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+        math(EXPR title_version "(${CMAKE_MATCH_1} << 10) | (${CMAKE_MATCH_2} << 4) | ${CMAKE_MATCH_3}")
+        set(title_version_text "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}")
+    endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+    set(icon_png "${OMW3DS_PACKAGING_DIR}/icon.png")
+    if(P_ICON)
+        set(icon_png "${P_ICON}")
+    endif()
+    set(smdh "${CMAKE_CURRENT_BINARY_DIR}/${target}.smdh")
+    ctr_generate_smdh(OUTPUT "${smdh}" NAME "${P_TITLE}" DESCRIPTION "${P_DESCRIPTION}" AUTHOR "${P_AUTHOR}" ICON "${icon_png}")
+    ctr_create_3dsx(${target} SMDH "${smdh}")
+
+    if(NOT OMW3DS_MAKEROM OR NOT OMW3DS_BANNERTOOL)
+        message(WARNING "makerom/bannertool not found: skipping .cia for ${target} (run scripts/bootstrap.ps1)")
+        return()
+    endif()
+
+    set(cia_smdh "${CMAKE_CURRENT_BINARY_DIR}/${target}.cia.smdh")
+    set(banner "${CMAKE_CURRENT_BINARY_DIR}/${target}.bnr")
+    set(cia "${CMAKE_CURRENT_BINARY_DIR}/${target}.cia")
+
+    add_custom_command(OUTPUT "${cia_smdh}"
+        COMMAND "${OMW3DS_BANNERTOOL}" makesmdh -s "${P_TITLE}" -l "${P_DESCRIPTION}" -p "${P_AUTHOR}"
+                -i "${icon_png}" -o "${cia_smdh}"
+        DEPENDS "${icon_png}" VERBATIM)
+    # HOME Menu banner and its swoosh (packaging/make_assets.py). The 3D emblem turning (banner3d.cgfx, made by
+    # tools/make_banner_model.py and pycgfx) when it is there, else the flat image: a 3D banner that worked in
+    # the emulator crashed the HOME Menu on hardware once (test #11), deleting banner3d.cgfx brings the flat one back.
+    set(banner_png "${OMW3DS_PACKAGING_DIR}/banner.png")
+    set(banner_cgfx "${OMW3DS_PACKAGING_DIR}/banner3d.cgfx")
+    set(banner_wav "${OMW3DS_PACKAGING_DIR}/banner.wav")
+    if(P_BANNER)
+        set(banner_png "${P_BANNER}")
+    endif()
+    if(EXISTS "${banner_cgfx}" AND NOT P_BANNER)
+        add_custom_command(OUTPUT "${banner}"
+            COMMAND "${OMW3DS_BANNERTOOL}" makebanner -ci "${banner_cgfx}" -a "${banner_wav}" -o "${banner}"
+            DEPENDS "${banner_cgfx}" "${banner_wav}" VERBATIM)
+    else()
+        add_custom_command(OUTPUT "${banner}"
+            COMMAND "${OMW3DS_BANNERTOOL}" makebanner -i "${banner_png}" -a "${banner_wav}" -o "${banner}"
+            DEPENDS "${banner_png}" "${banner_wav}" VERBATIM)
+    endif()
+    add_custom_command(OUTPUT "${cia}"
+        COMMAND "${OMW3DS_MAKEROM}" -f cia -o "${cia}" -target t -exefslogo
+                -elf "$<TARGET_FILE:${target}>" -rsf "${OMW3DS_PACKAGING_DIR}/app.rsf"
+                -icon "${cia_smdh}" -banner "${banner}"
+                "-DAPP_TITLE=${P_TITLE}" "-DAPP_PRODUCT_CODE=${P_PRODUCT_CODE}"
+                "-DAPP_UNIQUE_ID=${P_UNIQUE_ID}" "-DAPP_SYSTEM_MODE_EXT=${P_SYSTEM_MODE_EXT}" -ver ${title_version}
+        # makerom v0.19.0 drops -ver's minor number (1.1.0 comes out 1.0.0): the version written again after it.
+        COMMAND "${Python3_EXECUTABLE}" "${_omw3ds_root}/tools/set_cia_version.py" "${cia}" "${title_version_text}"
+        DEPENDS ${target} "${cia_smdh}" "${banner}" "${OMW3DS_PACKAGING_DIR}/app.rsf"
+            "${_omw3ds_root}/tools/set_cia_version.py"
+        COMMENT "Building CIA ${target}.cia (${P_SYSTEM_MODE_EXT}, version ${title_version_text})" VERBATIM)
+    # Same exheader as the .cia, but bootable directly by emulators (Azahar honours its memory mode),
+    # so emulator runs exercise exactly what the .cia requests.
+    set(cxi "${CMAKE_CURRENT_BINARY_DIR}/${target}.cxi")
+    add_custom_command(OUTPUT "${cxi}"
+        COMMAND "${OMW3DS_MAKEROM}" -f ncch -o "${cxi}" -target t -exefslogo
+                -elf "$<TARGET_FILE:${target}>" -rsf "${OMW3DS_PACKAGING_DIR}/app.rsf"
+                -icon "${cia_smdh}" -banner "${banner}"
+                "-DAPP_TITLE=${P_TITLE}" "-DAPP_PRODUCT_CODE=${P_PRODUCT_CODE}"
+                "-DAPP_UNIQUE_ID=${P_UNIQUE_ID}" "-DAPP_SYSTEM_MODE_EXT=${P_SYSTEM_MODE_EXT}"
+        DEPENDS ${target} "${cia_smdh}" "${banner}" "${OMW3DS_PACKAGING_DIR}/app.rsf"
+        COMMENT "Building CXI ${target}.cxi (emulator twin of the .cia)" VERBATIM)
+    add_custom_target(${target}_cia ALL DEPENDS "${cia}" "${cxi}")
+endfunction()

@@ -12,6 +12,50 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if (OPENMW_PLATFORM_3DS)
+    # Nintendo 3DS port. int32_t = int ABI (arm-none-eabi defaults to long, see the header), and
+    # POSIX declarations (strnlen, fileno, ...) that newlib hides in strict C++20 mode.
+    add_compile_options("SHELL:-include ${OPENMW3DS_ROOT}/deps/compat/include/openmw3ds_int32.h")
+    add_compile_definitions(_GNU_SOURCE OPENMW_PLATFORM_3DS=1)
+    # Test builds (the debug tools) are a title of their own, "OpenMW Test", with their own folder on the SD card,
+    # so a test never touches the player's install (the tester, 22/10/2026): sdmc:/openmw-test, sdmc:/openmw for a
+    # release. The packaging (apps/openmw) gives the test title its own ID, icon and banner.
+    if (OPENMW3DS_DEBUG)
+        set(OPENMW3DS_SD_DIR "openmw-test")
+        set(OPENMW3DS_UNIQUE_ID 0xF6D3F)
+    else()
+        set(OPENMW3DS_SD_DIR "openmw")
+        set(OPENMW3DS_UNIQUE_ID 0xF6D3E)
+    endif()
+    add_compile_definitions(OPENMW3DS_SD_DIR="${OPENMW3DS_SD_DIR}" OPENMW3DS_UNIQUE_ID=${OPENMW3DS_UNIQUE_ID})
+    # The port's own version (start menu, main menu, credits, loading screen). Between releases
+    # <version>-dev<N>, N the hardware test being packaged: the "Test #N" title of
+    # packaging/test-menu.txt (the tester, 21/10), read again whenever that file changes.
+    set(OPENMW3DS_TEST_MENU "${OPENMW3DS_ROOT}/packaging/test-menu.txt")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${OPENMW3DS_TEST_MENU}")
+    set(OPENMW3DS_VERSION "0.2.0-dev")
+    if (EXISTS "${OPENMW3DS_TEST_MENU}")
+        file(STRINGS "${OPENMW3DS_TEST_MENU}" _omw3ds_title REGEX "^title Test #[0-9]+")
+        if (_omw3ds_title MATCHES "#([0-9]+)")
+            set(OPENMW3DS_VERSION "0.2.0-dev${CMAKE_MATCH_1}")
+        endif()
+    endif()
+    # A release build (scripts/make-release.ps1) names its version: 0.1.0, no test number.
+    set(OPENMW3DS_RELEASE_VERSION "" CACHE STRING "The release's version (empty: 0.1.0-dev<test>)")
+    if (OPENMW3DS_RELEASE_VERSION)
+        set(OPENMW3DS_VERSION "${OPENMW3DS_RELEASE_VERSION}")
+    endif()
+    message(STATUS "OpenMW 3DS version ${OPENMW3DS_VERSION}")
+    # In a generated header (rewritten only when the version changes), not a compile definition: a new test number
+    # then rebuilds the few files that show it, not all ~860.
+    file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/openmw3ds_version.h"
+        CONTENT "#pragma once
+#define OPENMW3DS_VERSION \"${OPENMW3DS_VERSION}\"
+" @ONLY)
+    include_directories(${CMAKE_BINARY_DIR})
+    include_directories(SYSTEM ${OPENMW3DS_DEPS_PREFIX}/include)
+endif()
+
 option(OPENMW_GL4ES_MANUAL_INIT "Manually initialize gl4es. This is more reliable on platforms without a windowing system. Requires gl4es to be configured with -DNOEGL=ON -DNO_LOADER=ON -DNO_INIT_CONSTRUCTOR=ON." OFF)
 if(OPENMW_GL4ES_MANUAL_INIT)
     add_compile_definitions(OPENMW_GL4ES_MANUAL_INIT)
@@ -328,6 +372,9 @@ set(USED_OSG_PLUGINS
     osgdb_png
     osgdb_serializers_osg
     osgdb_tga)
+if (OPENMW_PLATFORM_3DS)
+    list(REMOVE_ITEM USED_OSG_PLUGINS osgdb_dae) # no Collada on 3DS
+endif()
 
 option(OPENMW_USE_SYSTEM_ICU "Use system ICU library instead of internal. If disabled, requires autotools" ON)
 if(OPENMW_USE_SYSTEM_ICU)
@@ -354,6 +401,11 @@ add_subdirectory(extern)
 
 # Sound setup
 
+if (OPENMW_PLATFORM_3DS)
+    # 3DS: no video playback and no FFmpeg (code size, CPU). Audio decoding is replaced (M7).
+    set(FFmpeg_FOUND TRUE)
+    set(FFVER_OK TRUE)
+else()
 # Require at least FFmpeg 4.0
 SET(FFVER_OK FALSE)
 
@@ -391,6 +443,7 @@ endif()
 if(NOT FFmpeg_FOUND)
     message(FATAL_ERROR "FFmpeg was not found" )
 endif()
+endif() # OPENMW_PLATFORM_3DS
 
 # Required for building the FFmpeg headers
 add_compile_definitions(__STDC_CONSTANT_MACROS)
@@ -424,7 +477,33 @@ if (WIN32)
     )
 endif()
 
-if(OPENMW_USE_SYSTEM_BULLET)
+if(OPENMW_USE_SYSTEM_BULLET AND OPENMW_PLATFORM_3DS)
+    # 3DS: single-precision Bullet from its own prefix (cmake/openmw-3ds-cache.cmake). A double-precision library
+    # there would fail the link check below instead of crashing at run time (mangled names differ).
+    set(BULLET_INCLUDE_DIRS "${OPENMW3DS_BULLET_FLOAT_PREFIX}/include/bullet")
+    set(BULLET_LIBRARIES "${OPENMW3DS_BULLET_FLOAT_PREFIX}/lib/libBulletCollision.a"
+        "${OPENMW3DS_BULLET_FLOAT_PREFIX}/lib/libLinearMath.a")
+    file(WRITE ${CMAKE_BINARY_DIR}/try-compile/checkbulletfloat.cpp
+"
+#include <BulletCollision/CollisionShapes/btSphereShape.h>
+int main(int argc, char** argv)
+{
+    btSphereShape shape(1.0);
+    btScalar mass(1.0);
+    btVector3 inertia;
+    shape.calculateLocalInertia(mass, inertia);
+    return 0;
+}
+")
+    try_compile(OPENMW3DS_BULLET_IS_FLOAT ${CMAKE_BINARY_DIR}/try-compile/float
+        ${CMAKE_BINARY_DIR}/try-compile/checkbulletfloat.cpp
+        LINK_LIBRARIES ${BULLET_LIBRARIES}
+        CMAKE_FLAGS "-DINCLUDE_DIRECTORIES=${BULLET_INCLUDE_DIRS}")
+    if (NOT OPENMW3DS_BULLET_IS_FLOAT)
+        message(FATAL_ERROR "No single-precision Bullet in ${OPENMW3DS_BULLET_FLOAT_PREFIX}: run scripts/build-deps.ps1 bulletfloat")
+    endif()
+    message(STATUS "Bullet uses single precision (3DS)")
+elseif(OPENMW_USE_SYSTEM_BULLET)
     set(REQUIRED_BULLET_VERSION 287) # 287 for btIDebugDraw::clearLines (286 already needed for btCapsuleShape fixes)
 
     # First, try BulletConfig-float64.cmake which comes with Debian derivatives.
@@ -545,14 +624,28 @@ if(HAVE_MULTIVIEW)
 endif(HAVE_MULTIVIEW)
 
 set(BOOST_COMPONENTS iostreams program_options)
+if (OPENMW_PLATFORM_3DS)
+    # Only boost::iostreams::stream (header-only) is used. The compiled part needs mmap.
+    set(BOOST_COMPONENTS program_options)
+    add_compile_definitions(BOOST_HAS_PTHREADS) # no Boost.Config platform file for __3DS__
+endif()
 
 find_package(Boost 1.70.0 CONFIG REQUIRED COMPONENTS ${BOOST_COMPONENTS} OPTIONAL_COMPONENTS ${BOOST_OPTIONAL_COMPONENTS})
+if (OPENMW_PLATFORM_3DS AND NOT TARGET Boost::iostreams)
+    add_library(Boost::iostreams INTERFACE IMPORTED) # header-only use (see BOOST_COMPONENTS above)
+    target_link_libraries(Boost::iostreams INTERFACE Boost::headers)
+endif()
 
 if(OPENMW_USE_SYSTEM_MYGUI)
     find_package(MyGUI 3.4.3 REQUIRED)
 endif()
 find_package(SDL2 2.26 REQUIRED)
+if (NOT OPENMW_PLATFORM_3DS) # 3DS: sound output goes through NDSP instead of OpenAL (M7)
 find_package(OpenAL REQUIRED)
+else()
+set(OPENAL_INCLUDE_DIR "")
+set(OPENAL_LIBRARY "")
+endif()
 find_package(ZLIB REQUIRED)
 
 option(USE_LUAJIT "Switch Lua/LuaJit (TRUE is highly recommended)" TRUE)
@@ -564,7 +657,7 @@ else(USE_LUAJIT)
     find_package(Lua REQUIRED)
     add_compile_definitions(NO_LUAJIT)
 endif(USE_LUAJIT)
-if (NOT WIN32 AND NOT ANDROID)
+if (NOT WIN32 AND NOT ANDROID AND NOT OPENMW_PLATFORM_3DS) # try_run is impossible when cross-compiling. PUC Lua 5.1 supports custom allocators
     include(cmake/CheckLuaCustomAllocator.cmake)
 endif()
 
@@ -690,7 +783,12 @@ endif()
 
 # Extern
 
+if (NOT OPENMW_PLATFORM_3DS) # no video playback on 3DS
 add_subdirectory (extern/osg-ffmpeg-videoplayer)
+else()
+# Port platform layer (logging, crash logger, bottom screen, memory budget), kept outside openmw/.
+add_subdirectory(${OPENMW3DS_ROOT}/platform3ds ${CMAKE_BINARY_DIR}/platform3ds)
+endif()
 add_subdirectory (extern/oics)
 add_subdirectory (extern/Base64)
 if (BUILD_OPENCS OR BUILD_OPENCS_TESTS)
@@ -1033,7 +1131,7 @@ if (APPLE)
 
     set(CPACK_PRE_BUILD_SCRIPTS ${CMAKE_SOURCE_DIR}/cmake/SignMacApplications.cmake)
 
-elseif(NOT APPLE)
+elseif(NOT APPLE AND NOT OPENMW_PLATFORM_3DS) # 3DS: packaged as .3dsx/.cia, no desktop install
     if(WIN32)
         # this just deals with Qt plugins now as if we get windeployqt.exe to do it, it adds things we don't need like ANGLE
         INSTALL(DIRECTORY

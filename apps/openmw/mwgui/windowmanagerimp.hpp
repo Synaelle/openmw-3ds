@@ -31,6 +31,8 @@
 #include "tooltips.hpp"
 #include "windowbase.hpp"
 
+#include "../n3ds/menufriend.hpp"
+
 #include <MyGUI_Gui.h>
 #include <MyGUI_KeyCode.h>
 #include <MyGUI_Types.h>
@@ -125,6 +127,8 @@ namespace MWGui
 
     class WindowManager : public MWBase::WindowManager
     {
+        OMW3DS_MENU_FRIEND
+        OMW3DS_HUD_FRIEND
     public:
         typedef std::pair<std::string, int> Faction;
         typedef std::vector<Faction> FactionList;
@@ -374,6 +378,12 @@ namespace MWGui
         void setWerewolfOverlay(bool set) override;
 
         void toggleConsole() override;
+#ifdef OPENMW_PLATFORM_3DS
+        // Select (n3ds: mwinput/controllermanager.cpp): the console on the top screen and the system keyboard for a
+        // command, run when confirmed. Select again types another, cancelling the keyboard closes it. Only opens from
+        // the game itself (no window, page or tab up).
+        void selectConsole3DS();
+#endif
         void toggleDebugWindow() override;
         void togglePostProcessorHud() override;
         void toggleSettingsWindow() override;

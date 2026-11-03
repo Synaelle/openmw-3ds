@@ -1,4 +1,27 @@
 #include "mainmenu.hpp"
+#ifdef OPENMW_PLATFORM_3DS
+#include <openmw3ds_version.h>
+#endif
+
+#include <algorithm>
+
+#include <components/version/version.hpp>
+
+#ifdef OPENMW_PLATFORM_3DS
+#include "../n3ds/credits3ds.hpp"
+
+#include <format>
+
+#include <MyGUI_Button.h>
+#include <components/esm3/loadclas.hpp>
+#include <components/esm3/loadnpc.hpp>
+#include <components/esm3/loadrace.hpp>
+
+#include "../mwmechanics/creaturestats.hpp"
+#include "../mwworld/class.hpp"
+#include "../mwworld/datetimemanager.hpp"
+#include "../mwworld/esmstore.hpp"
+#endif
 
 #include <MyGUI_Gui.h>
 #include <MyGUI_InputManager.h>
@@ -107,11 +130,19 @@ namespace MWGui
         , mBackground(nullptr)
     {
         getWidget(mVersionText, "VersionText");
+#ifdef OPENMW_PLATFORM_3DS
+        // One line in the menu's font (the tester, 20/10): the port's version, then the OpenMW it's built on.
+        mVersionText->setCaption(OPENMW3DS_VERSION " (built on OpenMW " + std::string(Version::getVersion()) + ")");
+#else
         mVersionText->setCaption(versionDescription);
+#endif
 
         constexpr VFS::Path::NormalizedView menuBackgroundVideo("video/menu_background.bik");
 
         mHasAnimatedMenu = mVFS->exists(menuBackgroundVideo);
+#ifdef OPENMW_PLATFORM_3DS
+        mHasAnimatedMenu = false; // no video on the 3DS: the title picture (showBackground)
+#endif
         mDisableGamepadCursor = Settings::gui().mControllerMenus;
 
         updateMenu();
@@ -173,7 +204,11 @@ namespace MWGui
         if (name == "return")
             winMgr->removeGuiMode(GM_MainMenu);
         else if (name == "credits")
+#ifdef OPENMW_PLATFORM_3DS
+            omw3ds::showCredits(); // the port's credits and licences (no video on the 3DS)
+#else
             winMgr->playVideo("mw_credits.bik", true);
+#endif
         else if (name == "exitgame")
         {
             if (MWBase::Environment::get().getStateManager()->getState() == MWBase::StateManager::State_NoGame)
@@ -274,10 +309,61 @@ namespace MWGui
                 mBackground = MyGUI::Gui::getInstance().createWidgetReal<BackgroundImage>(
                     "ImageBox", 0, 0, 1, 1, MyGUI::Align::Stretch, "MainMenuBackground");
                 mBackground->setBackgroundImage("textures\\menu_morrowind.dds", true, stretch);
+#ifdef OPENMW_PLATFORM_3DS
+                // The picture on the top screen, with its proportions (the top screen is cleared black under
+                // it by the backend when no scene is drawn, the HUD is hidden while no game runs: hud3ds.cpp).
+                mBackground->setCoord(MyGUI::IntCoord(0, 0, mWidth, mHeight / 2));
+#endif
             }
             mBackground->setVisible(true);
         }
     }
+
+#ifdef OPENMW_PLATFORM_3DS
+    void MainMenu::updatePanel3DS(bool inGame)
+    {
+        if (mPanel3DS == nullptr)
+        {
+            mPanel3DS = mMainWidget->createWidget<MyGUI::Widget>(
+                "MW_Dialog", MyGUI::IntCoord(40, 240, 320, 222), MyGUI::Align::Default);
+            // The character only (test #106, the tester: the touch buttons were messy, the information useful):
+            // the top screen's menu does the rest. Four lines in the middle of the panel.
+            for (int i = 0; i < 4; ++i)
+            {
+                mPanelLines3DS[i] = mPanel3DS->createWidget<MyGUI::TextBox>(i == 0 ? "HeaderText" : "SandText",
+                    MyGUI::IntCoord(8, 56 + i * 28, 304, 20), MyGUI::Align::Default);
+                mPanelLines3DS[i]->setTextAlign(MyGUI::Align::Center);
+            }
+        }
+        mPanel3DS->setVisible(inGame);
+        if (!inGame)
+            return;
+
+        const MWWorld::Ptr player = MWBase::Environment::get().getWorld()->getPlayerPtr();
+        const MWWorld::ESMStore& store = *MWBase::Environment::get().getESMStore();
+        const ESM::NPC* npc = player.get<ESM::NPC>()->mBase;
+        const ESM::Race* race = store.get<ESM::Race>().search(npc->mRace);
+        const ESM::Class* playerClass = store.get<ESM::Class>().search(npc->mClass);
+        const int level = player.getClass().getCreatureStats(player).getLevel();
+        mPanelLines3DS[0]->setCaption(npc->mName);
+        mPanelLines3DS[1]->setCaptionWithReplacing(std::format("#{{sLevel}} {} {} {}", level,
+            race ? race->mName : std::string(), playerClass ? playerClass->mName : std::string()));
+        mPanelLines3DS[2]->setCaption(std::string(MWBase::Environment::get().getWorld()->getCellName()));
+
+        // The date as the rest window writes it (waitdialog.cpp).
+        const MWWorld::DateTimeManager& timeManager = *MWBase::Environment::get().getWorld()->getTimeManager();
+        int hour = static_cast<int>(timeManager.getTimeStamp().getHour());
+        const bool pm = hour >= 12;
+        if (hour >= 13)
+            hour -= 12;
+        if (hour == 0)
+            hour = 12;
+        const ESM::EpochTimeStamp date = timeManager.getEpochTimeStamp();
+        mPanelLines3DS[3]->setCaptionWithReplacing(std::format("{} {} (#{{Calendar:day}} {}) {} {}", date.mDay,
+            timeManager.getMonthName(), timeManager.getTimeStamp().getDay(), hour,
+            pm ? "#{Calendar:pm}" : "#{Calendar:am}"));
+    }
+#endif
 
     void MainMenu::onFrame(float)
     {
@@ -315,7 +401,12 @@ namespace MWGui
         if (state == MWBase::StateManager::State_Running)
             buttons.emplace_back("return");
 
-        buttons.emplace_back("newgame");
+#ifdef OPENMW_PLATFORM_3DS
+        // A new game only from the main menu: starting one over a running game is untested on the console and
+        // could run out of memory (the tester, 22/10/2026).
+        if (state != MWBase::StateManager::State_Running)
+#endif
+            buttons.emplace_back("newgame");
 
         if (state == MWBase::StateManager::State_Running
             && MWBase::Environment::get().getWorld()->getGlobalInt(MWWorld::Globals::sCharGenState) == -1
@@ -379,9 +470,36 @@ namespace MWGui
             button->setImageTile(MyGUI::IntSize(requested.width, static_cast<int>(requested.height - 16 * scale)));
             button->setCoord(static_cast<int>((maxwidth - requested.width / scale) / 2), curH,
                 static_cast<int>(requested.width / scale), static_cast<int>(height / scale - 16));
+#ifdef OPENMW_PLATFORM_3DS
+            // Six buttons on the bottom screen's 240 px: 40 px apart (the images' lower rows are padding, the
+            // buttons overlap there, MyGUI draws the images at their own size).
+            curH += 40;
+#else
             curH += static_cast<int>(height / scale - 16);
+#endif
         }
 
+#ifdef OPENMW_PLATFORM_3DS
+        // The canvas is both screens (400x480, the bottom screen's 320x240 at 40,240): the buttons centred on
+        // the bottom screen, the title picture on the top one (showBackground), the version at the bottom right.
+        if (state == MWBase::StateManager::State_NoGame)
+        {
+            // Above the button hint strip (M17).
+            mButtonBox->setCoord(40 + (320 - maxwidth) / 2, 240 + std::max(0, (222 - curH) / 2), maxwidth, curH + 8);
+            mVersionText->setCoord(40, 240 + 2, 320 - 4, 18);
+        }
+        else
+        {
+            // The pause menu over the scene on the top screen (the tester's design, test #69).
+            mButtonBox->setCoord((400 - maxwidth) / 2, (240 - curH) / 2, maxwidth, curH + 8);
+            mVersionText->setCoord(0, 240 - 18, 400 - 4, 18);
+        }
+        updatePanel3DS(state != MWBase::StateManager::State_NoGame);
+        // M17: the button hints (B goes back to the game when there is one).
+        mControllerButtons.mA = "#{Interface:Select}";
+        mControllerButtons.mB = state == MWBase::StateManager::State_NoGame ? "" : "#{Interface:Back}";
+        MWBase::Environment::get().getWindowManager()->updateControllerButtonsOverlay();
+#else
         if (state == MWBase::StateManager::State_NoGame)
         {
             // Align with the background image
@@ -390,5 +508,6 @@ namespace MWGui
         }
         else
             mButtonBox->setCoord(mWidth / 2 - maxwidth / 2, mHeight / 2 - curH / 2, maxwidth, curH);
+#endif
     }
 }

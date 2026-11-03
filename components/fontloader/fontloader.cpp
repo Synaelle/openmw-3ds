@@ -266,6 +266,13 @@ namespace Gui
         if (!MyGUI::ResourceManager::getInstance().isExist(scrollFontId.mValue)
             && !Misc::StringUtils::ciEqual(scrollFont, "DemonicLetters"))
             loadFont(scrollFontId, "DemonicLetters");
+#ifdef OPENMW_PLATFORM_3DS
+        // M17: the button hint strip's text (openmw_controllerbuttons.layout), smaller than the interface's so a
+        // window's five or six hints fit the bottom screen's width.
+        mSizeOverride = 13;
+        loadFont(FontId{ "HintFont" }, "MysticCards");
+        mSizeOverride = 0;
+#endif
     }
 
     void FontLoader::loadFont(FontId fontId, std::string_view fileName)
@@ -310,6 +317,11 @@ namespace Gui
         std::unique_ptr<MyGUI::IDataStream> layersStream(dataManager->getData("openmw_layers.xml"));
         MyGUI::IntSize bookSize = getBookSize(layersStream.get());
         float bookScale = MyGUIPlatform::ScalingLayer::getScaleFactor(bookSize);
+#ifdef OPENMW_PLATFORM_3DS
+        // M19 (test #105: book text unreadable): books, scrolls and the journal are drawn at their size on the top
+        // screen now, not in the scaled JournalBooks layer (0.6): their font at its own size, not rendered at 60%.
+        bookScale = 1.f;
+#endif
         const VFS::Path::Normalized oldDataPath(dataManager->getResourcePath());
 
         struct SetOldResourcePath
@@ -361,7 +373,12 @@ namespace Gui
 
         MyGUI::xml::ElementPtr sizeNode = resourceNode->createChild("Property");
         sizeNode->addAttribute("key", "Size");
-        sizeNode->addAttribute("value", std::to_string(Settings::gui().mFontSize));
+#ifdef OPENMW_PLATFORM_3DS
+        const int fontSize = mSizeOverride > 0 ? mSizeOverride : Settings::gui().mFontSize;
+#else
+        const int fontSize = Settings::gui().mFontSize;
+#endif
+        sizeNode->addAttribute("value", std::to_string(fontSize));
 
         MyGUI::ResourceTrueTypeFont* font = static_cast<MyGUI::ResourceTrueTypeFont*>(
             MyGUI::FactoryManager::getInstance().createObject("Resource", "ResourceTrueTypeFont"));

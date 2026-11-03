@@ -1,5 +1,9 @@
 #include "luastate.hpp"
 
+#ifdef OPENMW_PLATFORM_3DS
+#include <platform3ds/pools.hpp>
+#endif
+
 #ifndef NO_LUAJIT
 #include <luajit.h>
 #endif // NO_LUAJIT
@@ -17,6 +21,10 @@
 
 #if SOL_IS_ON(SOL_PROPAGATE_EXCEPTIONS)
 #error SOL_PROPAGATE_EXCEPTIONS inhibits error checking
+#endif
+
+#ifdef OPENMW_PLATFORM_3DS
+#include <platform3ds/memprobe.hpp>
 #endif
 
 namespace LuaUtil
@@ -109,10 +117,19 @@ namespace LuaUtil
 
         void* newPtr = nullptr;
         if (nsize == 0)
+#ifdef OPENMW_PLATFORM_3DS
+            p3ds::pools::luaRealloc(ptr, 0);
+#else
             free(ptr);
+#endif
         else
         {
+#ifdef OPENMW_PLATFORM_3DS
+            // Lua's own pool: its churn every frame stays out of the main heap (M9).
+            newPtr = p3ds::pools::luaRealloc(ptr, nsize);
+#else
             newPtr = realloc(ptr, nsize);
+#endif
             if (!newPtr)
             {
                 Log(Debug::Error) << "Lua realloc " << osize << "->" << nsize << " failed";
@@ -168,7 +185,18 @@ namespace LuaUtil
             Log(Debug::Error) << "Failed to initialize LuaUtil::LuaState with custom allocator; disabling Lua profiler";
         }
         Log(Debug::Info) << "Initializing LuaUtil::LuaState without profiler";
+#ifdef OPENMW_PLATFORM_3DS
+        // luaL_newstate with Lua's own pool (M9) instead of realloc: the same panic handler as lauxlib's.
+        LuaStatePtr state(lua_newstate(
+            [](void*, void* ptr, size_t, size_t nsize) { return p3ds::pools::luaRealloc(ptr, nsize); }, nullptr));
+        if (state != nullptr)
+            lua_atpanic(state.get(), [](lua_State* L) {
+                Log(Debug::Error) << "PANIC: unprotected error in call to Lua API (" << lua_tostring(L, -1) << ")";
+                return 0;
+            });
+#else
         LuaStatePtr state(luaL_newstate());
+#endif
         if (state == nullptr)
             throw std::runtime_error("Failed to create Lua runtime");
         return state;
@@ -185,6 +213,13 @@ namespace LuaUtil
         , mConf(conf)
         , mVFS(vfs)
     {
+#ifdef OPENMW_PLATFORM_3DS
+        // Diagnostics: report Lua VM memory (lua_gc COUNT is a plain read of the GC byte counter).
+        p3ds::memprobe::addReporter("lua", [](void* L) -> uint64_t {
+            lua_State* state = static_cast<lua_State*>(L);
+            return uint64_t(lua_gc(state, LUA_GCCOUNT, 0)) * 1024u + uint64_t(lua_gc(state, LUA_GCCOUNTB, 0));
+        }, mLuaState.get());
+#endif
         if (sProfilerEnabled)
             lua_sethook(mLuaState.get(), &countHook, LUA_MASKCOUNT, countHookStep);
 

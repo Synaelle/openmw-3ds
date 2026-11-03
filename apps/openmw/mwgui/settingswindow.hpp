@@ -131,6 +131,21 @@ namespace MWGui
         MyGUI::TextBox* getSliderLabel(MyGUI::ScrollBar* scroller) const;
 
         void layoutControlsBox();
+
+#ifdef OPENMW_PLATFORM_3DS
+        // M17: the D-pad moves a highlight over the open tab's options (sliders, on/off buttons). Left/right change
+        // a slider or switch a button, A presses it.
+        std::vector<MyGUI::Widget*> mFocusables3DS;
+        size_t mFocus3DS = 0;
+        MyGUI::Widget* mFocusFrame3DS = nullptr;
+        void collectFocusables3DS(bool keepFocus);
+        void showFocus3DS();
+        void useFocus3DS(int step);
+        // The level buttons (SettingType Level3DS, an int setting 0 Low, 1 Medium, 2 High).
+        void setLevelCaption3DS(MyGUI::Widget* button);
+        void changeLevel3DS(MyGUI::Widget* button, int step);
+        void onLevelClicked3DS(MyGUI::Widget* sender);
+#endif
         void renderScriptSettings();
 
         void computeMinimumWindowSize();

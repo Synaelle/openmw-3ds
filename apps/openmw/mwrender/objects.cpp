@@ -1,12 +1,17 @@
 #include "objects.hpp"
+#include <components/misc/omw3dsdetail.hpp>
 
 #include <osg/Group>
+#ifdef OPENMW_PLATFORM_3DS
+#include <cmath>
+#endif
 
 #include <components/misc/resourcehelpers.hpp>
 #include <components/misc/strings/algorithm.hpp>
 #include <components/sceneutil/positionattitudetransform.hpp>
 #include <components/sceneutil/unrefqueue.hpp>
 #include <components/sceneutil/userdata.hpp>
+#include <components/sceneutil/visitor.hpp>
 
 #include "../mwworld/class.hpp"
 #include "../mwworld/ptr.hpp"
@@ -19,6 +24,21 @@
 
 namespace MWRender
 {
+#ifdef OPENMW3DS_DEBUG
+    namespace
+    {
+        // The perf log's "cull.cells" phase: the cull traversal of the objects of the loaded cells.
+        class CellCullPhase : public osg::NodeCallback
+        {
+        public:
+            void operator()(osg::Node* node, osg::NodeVisitor* nv) override
+            {
+                p3ds::perf::Phase phase("cull.cells");
+                traverse(node, nv);
+            }
+        };
+    }
+#endif
 
     Objects::Objects(Resource::ResourceSystem* resourceSystem, const osg::ref_ptr<osg::Group>& rootNode,
         SceneUtil::UnrefQueue& unrefQueue)
@@ -35,10 +55,14 @@ namespace MWRender
         for (CellMap::iterator iter = mCellSceneNodes.begin(); iter != mCellSceneNodes.end(); ++iter)
             iter->second->getParent(0)->removeChild(iter->second);
         mCellSceneNodes.clear();
+#ifdef OPENMW_PLATFORM_3DS
+        mCellAreas.clear();
+#endif
     }
 
     void Objects::insertBegin(const MWWorld::Ptr& ptr)
     {
+        OMW3DS_DETAIL("obj.begin");
         assert(mObjects.find(ptr.mRef) == mObjects.end());
 
         osg::ref_ptr<osg::Group> cellnode;
@@ -48,6 +72,9 @@ namespace MWRender
         {
             cellnode = new osg::Group;
             cellnode->setName("Cell Root");
+#ifdef OPENMW3DS_DEBUG
+            cellnode->addCullCallback(new CellCullPhase);
+#endif
             mRootNode->addChild(cellnode);
             mCellSceneNodes[ptr.getCell()] = cellnode;
         }
@@ -55,7 +82,29 @@ namespace MWRender
             cellnode = found->second;
 
         osg::ref_ptr<SceneUtil::PositionAttitudeTransform> insert(new SceneUtil::PositionAttitudeTransform);
+#ifdef OPENMW_PLATFORM_3DS
+        // Objects grouped by 2048-unit square of their position under the cell node: the cull traversal rejects an
+        // off-screen square with one bounding-sphere test instead of one per object (~1800 objects in the 3x3
+        // exterior cells, ~150 of them in view at the 2560-unit view distance), and an actor moving dirties the
+        // bound of its square's group (tens of children), not of the whole cell (hundreds). Moving objects stay
+        // in their square's group (its bound follows them).
+        {
+            constexpr float areaSize = 2048.f;
+            const float* pos = ptr.getRefData().getPosition().pos;
+            const std::pair<int, int> area(
+                static_cast<int>(std::floor(pos[0] / areaSize)), static_cast<int>(std::floor(pos[1] / areaSize)));
+            osg::ref_ptr<osg::Group>& areaNode = mCellAreas[ptr.getCell()][area];
+            if (areaNode == nullptr)
+            {
+                areaNode = new osg::Group;
+                areaNode->setName("Cell Area");
+                cellnode->addChild(areaNode);
+            }
+            areaNode->addChild(insert);
+        }
+#else
         cellnode->addChild(insert);
+#endif
 
         SceneUtil::addUserData(*insert, ptr);
 
@@ -73,6 +122,7 @@ namespace MWRender
 
     void Objects::insertModel(const MWWorld::Ptr& ptr, const std::string& mesh, bool allowLight)
     {
+        OMW3DS_DETAIL("obj.model");
         insertBegin(ptr);
         ptr.getRefData().getBaseNode()->setNodeMask(Mask_Object);
         bool animated = ptr.getClass().useAnim();
@@ -85,8 +135,20 @@ namespace MWRender
                 animated = false;
         }
 
-        mObjects.emplace(
-            ptr.mRef, std::make_unique<ObjectAnimation>(ptr, animationMesh, mResourceSystem, animated, allowLight));
+        auto anim = std::make_unique<ObjectAnimation>(ptr, animationMesh, mResourceSystem, animated, allowLight);
+#ifdef OPENMW_PLATFORM_3DS
+        // Perf batch 2: a still object's particle systems (a candle's flame, a brazier's smoke) can share one
+        // recorded loop per kind (render3ds backend.cpp flameLoop). Actors' and spells' stay live.
+        if (!animated)
+        {
+            SceneUtil::FindByClassVisitor finder("ParticleSystem");
+            ptr.getRefData().getBaseNode()->accept(finder);
+            for (osg::Node* node : finder.mFoundNodes)
+                node->setUserValue("still3ds", true);
+        }
+#endif
+
+        mObjects.emplace(ptr.mRef, std::move(anim));
     }
 
     void Objects::insertCreature(const MWWorld::Ptr& ptr, const std::string& mesh, bool weaponsShields)
@@ -115,6 +177,7 @@ namespace MWRender
 
     void Objects::insertNPC(const MWWorld::Ptr& ptr)
     {
+        OMW3DS_DETAIL("obj.npc");
         insertBegin(ptr);
         ptr.getRefData().getBaseNode()->setNodeMask(Mask_Actor);
 
@@ -194,6 +257,9 @@ namespace MWRender
             cell->second->getParent(0)->removeChild(cell->second);
             mCellSceneNodes.erase(cell);
         }
+#ifdef OPENMW_PLATFORM_3DS
+        mCellAreas.erase(store);
+#endif
     }
 
     void Objects::updatePtr(const MWWorld::Ptr& old, const MWWorld::Ptr& cur)

@@ -313,7 +313,7 @@ add_component_dir (debug
     debugging debuglog gldebug debugdraw writeflags
     )
 add_component_dir (files
-    linuxpath androidpath windowspath macospath fixedpath multidircollection collections configurationmanager
+    linuxpath androidpath windowspath macospath threedspath fixedpath multidircollection collections configurationmanager
     constrainedfilestream memorystream hash configfileparser openfile constrainedfilestreambuf conversion
     istreamptr streamwithbuffer utils
     )
@@ -398,7 +398,7 @@ if(WIN32)
         windowscrashmonitor
         windowscrashshm
     )
-elseif(NOT ANDROID)
+elseif(NOT ANDROID AND NOT OPENMW_PLATFORM_3DS) # 3DS: platform3ds crash logger instead
     add_component_dir (crashcatcher
         crashcatcher
     )
@@ -583,7 +583,38 @@ if (OPENMW_USE_SYSTEM_SQLITE3)
     endif()
 endif()
 
+if (OPENMW_PLATFORM_3DS)
+    # No OpenGL: the 3DS window has no GL context (see sdlutil/sdlgraphicswindow_3ds.cpp).
+    list(FILTER COMPONENT_FILES EXCLUDE REGEX "sdlutil/sdlgraphicswindow\\.cpp$")
+    list(APPEND COMPONENT_FILES sdlutil/sdlgraphicswindow_3ds.cpp)
+    # Dialogue/book text read from the content files on demand (esm3/lazystring.hpp).
+    list(APPEND COMPONENT_FILES esm3/lazystring.cpp)
+    # citro3d draw backend and the PC-cooked texture pack (render3ds/render3ds.hpp).
+    list(APPEND COMPONENT_FILES render3ds/backend.cpp render3ds/texturepack.cpp)
+    # Per-frame hot code at -O2. Everything else stays -Os (image size is memory). Scene graph callbacks,
+    # light manager, CPU skinning (sceneutil), keyframe controllers (nifosg), MyGUI rendering, draw backend.
+    set(OMW3DS_HOT_COMPONENTS ${COMPONENT_FILES})
+    list(FILTER OMW3DS_HOT_COMPONENTS INCLUDE REGEX "/(sceneutil|nifosg|myguiplatform|render3ds)/[^/]*\\.cpp$")
+    set_source_files_properties(${OMW3DS_HOT_COMPONENTS} PROPERTIES COMPILE_OPTIONS "-O2")
+endif()
+
 add_library(components STATIC ${COMPONENT_FILES})
+if (OPENMW_PLATFORM_3DS)
+    # DVLE order matters (backend.cpp init): scene, flat, then the scene shader's light variants and the skinned
+    # one. One DVLB: the PICA holds 512 instructions and a frame switches between them by entry point alone. The
+    # self-test's probe shader is a DVLB of its own (M10: its room went to the skinned variant).
+    ctr_add_shader_library(render3ds_shaders OUTPUT scene.shbin render3ds/scene.v.pica render3ds/flat.v.pica
+        render3ds/scene1.v.pica render3ds/scene0.v.pica render3ds/skin1.v.pica render3ds/scene2.v.pica)
+    ctr_add_shader_library(render3ds_probe_shader OUTPUT probe.shbin render3ds/probe.v.pica)
+    dkp_add_embedded_binary_library(render3ds_shaders_bin render3ds_shaders render3ds_probe_shader)
+    # citro3d rebuilt with the port's patches (deps/build-deps.sh build_citro3d, deps/patches/citro3d), not
+    # devkitPro's: the same library and headers, cheaper draws.
+    set(OPENMW3DS_CITRO3D "${OPENMW3DS_DEPS_PREFIX}/lib/libcitro3d.a")
+    if (NOT EXISTS "${OPENMW3DS_CITRO3D}")
+        message(FATAL_ERROR "${OPENMW3DS_CITRO3D} missing: run scripts/build-deps.ps1 citro3d")
+    endif()
+    target_link_libraries(components platform3ds render3ds_shaders_bin "${OPENMW3DS_CITRO3D}")
+endif()
 
 if (ANDROID)
     set_property(TARGET components PROPERTY POSITION_INDEPENDENT_CODE ON)
@@ -679,9 +710,11 @@ endif()
 set(COMPONENT_FILES ${COMPONENT_FILES} PARENT_SCOPE)
 
 target_compile_definitions(components PUBLIC
-    BT_USE_DOUBLE_PRECISION
     MYGUI_DONT_USE_OBSOLETE=ON
 )
+if (NOT OPENMW_PLATFORM_3DS) # 3DS: single precision (openmw-3ds-cache.cmake)
+    target_compile_definitions(components PUBLIC BT_USE_DOUBLE_PRECISION)
+endif()
 
 if(OSG_STATIC)
     if(CMAKE_VERSION VERSION_LESS 3.24)

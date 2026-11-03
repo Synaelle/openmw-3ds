@@ -1,0 +1,9 @@
+# Upstream OpenMW keeps LF; keep our files LF too so diffs against upstream stay clean.
+* text=auto eol=lf
+*.png binary
+*.wav binary
+*.dds binary
+*.ttf binary
+
+*.zip binary
+*.ico binary

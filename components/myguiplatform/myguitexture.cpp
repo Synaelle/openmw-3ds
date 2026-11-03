@@ -9,6 +9,9 @@
 #include <components/debug/debuglog.hpp>
 #include <components/files/memorystream.hpp>
 #include <components/resource/imagemanager.hpp>
+#ifdef OPENMW_PLATFORM_3DS
+#include <components/render3ds/render3ds.hpp>
+#endif
 
 namespace MyGUIPlatform
 {
@@ -33,6 +36,18 @@ namespace MyGUIPlatform
         , mNumElemBytes(0)
         , mWidth(texture->getTextureWidth())
         , mHeight(texture->getTextureHeight())
+    {
+    }
+
+    OSGTexture::OSGTexture(const std::string& name, osg::Texture2D* texture, int width, int height)
+        : mName(name)
+        , mImageManager(nullptr)
+        , mTexture(texture)
+        , mFormat(MyGUI::PixelFormat::Unknow)
+        , mUsage(MyGUI::TextureUsage::Default)
+        , mNumElemBytes(0)
+        , mWidth(width)
+        , mHeight(height)
     {
     }
 
@@ -108,6 +123,15 @@ namespace MyGUIPlatform
 
         mWidth = image->s();
         mHeight = image->t();
+#ifdef OPENMW_PLATFORM_3DS
+        // Cooked textures have power-of-two sizes. MyGUI's skins are in the original image's pixels.
+        int sourceWidth, sourceHeight;
+        if (Render3DS::cookedSourceSize(*image, sourceWidth, sourceHeight))
+        {
+            mWidth = sourceWidth;
+            mHeight = sourceHeight;
+        }
+#endif
 
         mUsage = MyGUI::TextureUsage::Static;
     }

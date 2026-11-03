@@ -1,4 +1,5 @@
 #include "imagemanager.hpp"
+#include <components/misc/omw3dsdetail.hpp>
 
 #include <cassert>
 #include <osgDB/Registry>
@@ -10,6 +11,10 @@
 #include <components/vfs/pathutil.hpp>
 
 #include "objectcache.hpp"
+
+#ifdef OPENMW_PLATFORM_3DS
+#include <components/render3ds/render3ds.hpp>
+#endif
 
 #ifdef OSG_LIBRARY_STATIC
 // This list of plugins should match with the list in the top-level CMakelists.txt.
@@ -89,6 +94,17 @@ namespace Resource
             return osg::ref_ptr<osg::Image>(static_cast<osg::Image*>(obj.get()));
         else
         {
+#ifdef OPENMW_PLATFORM_3DS
+            OMW3DS_DETAIL("image");
+            OMW3DS_LOG_MISS("image", path.value());
+            // Textures converted on the PC to PICA formats (tools/cook_textures.py), read straight into GPU
+            // memory. The GPU can't sample DDS/S3TC.
+            if (osg::ref_ptr<osg::Image> cooked = Render3DS::loadCookedImage(path.value()))
+            {
+                mCache->addEntryToObjectCache(path.value(), cooked);
+                return cooked;
+            }
+#endif
             Files::IStreamPtr stream;
             try
             {

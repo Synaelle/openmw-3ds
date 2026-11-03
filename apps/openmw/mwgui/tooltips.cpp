@@ -1,5 +1,11 @@
 #include "tooltips.hpp"
 
+#ifdef OPENMW_PLATFORM_3DS
+#include <components/render3ds/render3ds.hpp>
+
+#include "../n3ds/hud3ds.hpp"
+#endif
+
 #include <format>
 #include <iomanip>
 
@@ -30,6 +36,15 @@
 #include "mapwindow.hpp"
 
 #include "itemmodel.hpp"
+
+#ifdef OPENMW_PLATFORM_3DS
+namespace
+{
+    // M8: while set, the tooltip being built is the crosshair's, a one-line label at the top of the screen in the
+    // small font: no icon, effects or notes (n3ds/hud3ds.hpp).
+    bool sTargetLabel3DS = false;
+}
+#endif
 
 namespace MWGui
 {
@@ -99,6 +114,11 @@ namespace MWGui
             if (!winMgr->getCursorVisible() && !winMgr->getControllerTooltipVisible())
                 return;
             const MyGUI::IntPoint& mousePos = MyGUI::InputManager::getInstance().getMousePosition();
+#ifdef OPENMW_PLATFORM_3DS
+            // Only the pointer's menus on the top screen have tooltips: the touch menus below never did.
+            if (mousePos.top >= Render3DS::kGuiBottomY)
+                return;
+#endif
 
             if (winMgr->getWorldMouseOver()
                 && (winMgr->isConsoleMode() || (winMgr->getMode() == GM_Container)
@@ -300,6 +320,30 @@ namespace MWGui
                 MyGUI::IntPoint tooltipPosition = MyGUI::InputManager::getInstance().getMousePosition();
 
                 position(tooltipPosition, tooltipSize, viewSize);
+#ifdef OPENMW_PLATFORM_3DS
+                // The pointer is on the top screen (class creation). A skill's or an attribute's description goes to
+                // the bottom screen, centred above its button hints, clear of what the pointer looks at. The others
+                // (a specialization's skills) stay by the pointer, on the top screen (the tester).
+                const std::string_view layout3DS = focus->getUserString("ToolTipLayout");
+                if (layout3DS == "SkillNoProgressToolTip" || layout3DS == "AttributeToolTip")
+                {
+                    tooltipPosition.left = Render3DS::kGuiBottomX + std::max(0, (320 - tooltipSize.width) / 2);
+                    tooltipPosition.top = Render3DS::kGuiBottomY + std::max(0, (216 - tooltipSize.height) / 2);
+                }
+                else if (tooltipPosition.top + tooltipSize.height > Render3DS::kGuiBottomY)
+                {
+                    // Above the pointer, or beside it when the screen is too short for either.
+                    tooltipPosition.top = mousePos.top - 8 - tooltipSize.height;
+                    if (tooltipPosition.top < 0)
+                    {
+                        tooltipPosition.top = std::clamp(mousePos.top - tooltipSize.height / 2, 0,
+                            std::max(0, Render3DS::kGuiBottomY - tooltipSize.height));
+                        tooltipPosition.left = mousePos.left + 16 + tooltipSize.width <= viewSize.width
+                            ? mousePos.left + 16
+                            : std::max(0, mousePos.left - 16 - tooltipSize.width);
+                    }
+                }
+#endif
 
                 setCoord(tooltipPosition.left, tooltipPosition.top, tooltipSize.width, tooltipSize.height);
             }
@@ -308,10 +352,22 @@ namespace MWGui
         {
             if (!mFocusObject.isEmpty())
             {
+#ifdef OPENMW_PLATFORM_3DS
+                sTargetLabel3DS = Render3DS::drawsGui();
+#endif
                 MyGUI::IntSize tooltipSize = getToolTipViaPtr(mFocusObject.getCellRef().getCount(), true, checkOwned());
 
-                const int left = viewSize.width / 2 - tooltipSize.width / 2;
-                const int top = std::max(0, int(mFocusToolTipY * viewSize.height - tooltipSize.height - 20));
+                int left = viewSize.width / 2 - tooltipSize.width / 2;
+                int top = std::max(0, int(mFocusToolTipY * viewSize.height - tooltipSize.height - 20));
+#ifdef OPENMW_PLATFORM_3DS
+                if (sTargetLabel3DS)
+                {
+                    const MyGUI::IntPoint at = omw3ds::targetLabel3DS(tooltipSize);
+                    left = at.left;
+                    top = at.top;
+                    sTargetLabel3DS = false;
+                }
+#endif
                 setCoord(left, top, tooltipSize.width, tooltipSize.height);
 
                 mDynamicToolTipBox->setVisible(true);
@@ -377,6 +433,18 @@ namespace MWGui
             ToolTipInfo info = object.getToolTipInfo(mFocusObject, count);
             if (!image)
                 info.icon.clear();
+#ifdef OPENMW_PLATFORM_3DS
+            if (sTargetLabel3DS)
+            {
+                info.caption = omw3ds::targetLabelText3DS(info.caption, info.text);
+                info.text.clear();
+                info.icon.clear();
+                info.enchant = ESM::RefId();
+                info.effects.clear();
+                info.notes.clear();
+                info.extra.clear();
+            }
+#endif
             tooltipSize = createToolTip(info, isOwned);
         }
 
@@ -441,7 +509,11 @@ namespace MWGui
         // this the maximum width of the tooltip before it starts word-wrapping
         setCoord(0, 0, 300, 300);
 
+#ifdef OPENMW_PLATFORM_3DS
+        const MyGUI::IntPoint padding = sTargetLabel3DS ? MyGUI::IntPoint(6, 3) : MyGUI::IntPoint(8, 8);
+#else
         const MyGUI::IntPoint padding(8, 8);
+#endif
 
         const int imageCaptionHPadding = !caption.empty() ? 8 : 0;
         const int imageCaptionVPadding = !caption.empty() ? 4 : 0;
@@ -455,6 +527,15 @@ namespace MWGui
             "NormalText", MyGUI::IntCoord(0, 0, 300, 300), MyGUI::Align::Left | MyGUI::Align::Top, "ToolTipCaption");
         captionWidget->setEditStatic(true);
         captionWidget->setNeedKeyFocus(false);
+#ifdef OPENMW_PLATFORM_3DS
+        if (sTargetLabel3DS)
+        {
+            // The normal font, wrapped at 300 px (test #67: the small font was hard to read on the top screen).
+            captionWidget->setEditMultiLine(true);
+            captionWidget->setEditWordWrap(true);
+            captionWidget->setTextAlign(MyGUI::Align::HCenter | MyGUI::Align::Top);
+        }
+#endif
         captionWidget->setCaptionWithReplacing(caption);
         MyGUI::IntSize captionSize = captionWidget->getTextSize();
 

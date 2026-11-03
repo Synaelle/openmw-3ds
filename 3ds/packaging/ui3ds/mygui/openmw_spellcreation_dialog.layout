@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- The spellmaking window on the two 3DS screens (M19, approved mockup): the values (spell cost, chance, price, your
+     gold) on the top screen; the name (a touch opens the system keyboard), the available and the added effects and
+     Buy/Cancel on the bottom one. The root spans the canvas (400x480) without a frame; the widget names are
+     spellcreationdialog.cpp's. -->
+<MyGUI type="Layout">
+    <Widget type="Window" skin="" layer="Windows" position="0 0 400 480" name="_Main">
+
+        <!-- Top screen: the values -->
+        <Widget type="Widget" skin="MW_Dialog" position="60 40 280 160">
+            <Widget type="VBox" position="14 12 252 136">
+                <Property key="Spacing" value="8"/>
+                <Widget type="HBox">
+                    <UserString key="HStretch" value="true"/>
+                    <Widget type="AutoSizedTextBox" skin="NormalText">
+                        <Property key="Caption" value="#{sEnchantmentMenu4}"/>
+                    </Widget>
+                    <Widget type="AutoSizedTextBox" skin="SandText" name="MagickaCost">
+                        <Property key="TextAlign" value="Right VCenter"/>
+                        <UserString key="HStretch" value="true"/>
+                    </Widget>
+                </Widget>
+                <Widget type="HBox">
+                    <UserString key="HStretch" value="true"/>
+                    <Widget type="AutoSizedTextBox" skin="NormalText">
+                        <Property key="Caption" value="#{sSpellmakingMenu1}"/>
+                    </Widget>
+                    <Widget type="AutoSizedTextBox" skin="SandText" name="SuccessChance">
+                        <Property key="TextAlign" value="Right VCenter"/>
+                        <UserString key="HStretch" value="true"/>
+                    </Widget>
+                </Widget>
+                <Widget type="HBox">
+                    <UserString key="HStretch" value="true"/>
+                    <Widget type="AutoSizedTextBox" skin="NormalText">
+                        <Property key="Caption" value="#{sBarterDialog7}"/>
+                    </Widget>
+                    <Widget type="AutoSizedTextBox" skin="SandText" name="PriceLabel">
+                        <Property key="TextAlign" value="Right VCenter"/>
+                        <UserString key="HStretch" value="true"/>
+                    </Widget>
+                </Widget>
+                <Widget type="HBox">
+                    <UserString key="HStretch" value="true"/>
+                    <Widget type="AutoSizedTextBox" skin="NormalText" name="PlayerGoldTextBox">
+                        <Property key="Caption" value="#{sGold}"/>
+                    </Widget>
+                    <Widget type="AutoSizedTextBox" skin="SandText" name="PlayerGold">
+                        <Property key="TextAlign" value="Right VCenter"/>
+                        <UserString key="HStretch" value="true"/>
+                    </Widget>
+                </Widget>
+            </Widget>
+        </Widget>
+
+        <!-- Bottom screen (222 high: the button hints below) -->
+        <Widget type="Widget" skin="MW_Dialog" position="40 240 320 222">
+            <Widget type="TextBox" skin="NormalText" position="8 6 50 22">
+                <Property key="Caption" value="#{sName}"/>
+                <Property key="TextAlign" value="Left VCenter"/>
+            </Widget>
+            <!-- A touch opens the system keyboard (spellcreationdialog.cpp) -->
+            <Widget type="EditBox" skin="MW_TextEdit" position="60 6 252 22" name="NameEdit">
+                <Property key="Static" value="true"/>
+            </Widget>
+
+            <Widget type="TextBox" skin="NormalText" position="8 32 146 18">
+                <Property key="Caption" value="#{sMagicEffects}"/>
+            </Widget>
+            <Widget type="MWList" skin="MW_SimpleList" position="8 52 146 132" name="AvailableEffects"/>
+
+            <Widget type="TextBox" skin="NormalText" position="160 32 152 18">
+                <Property key="Caption" value="#{sEffects}"/>
+            </Widget>
+            <Widget type="Widget" skin="MW_Box" position="160 52 152 132">
+                <Widget type="ScrollView" skin="MW_ScrollViewH" position="4 4 144 124" name="UsedEffects">
+                    <Property key="CanvasAlign" value="Left Top"/>
+                </Widget>
+            </Widget>
+
+            <Widget type="HBox" position="8 190 304 26">
+                <Widget type="Spacer"/>
+                <Widget type="AutoSizedButton" skin="MW_Button" name="BuyButton">
+                    <Property key="Caption" value="#{sBuy}"/>
+                </Widget>
+                <Widget type="AutoSizedButton" skin="MW_Button" name="CancelButton">
+                    <Property key="Caption" value="#{Interface:Cancel}"/>
+                </Widget>
+            </Widget>
+        </Widget>
+    </Widget>
+</MyGUI>

@@ -1,6 +1,7 @@
 #include "localmap.hpp"
 
 #include <cstdint>
+#include <limits>
 
 #include <osg/ComputeBoundsVisitor>
 #include <osg/Fog>
@@ -24,6 +25,9 @@
 #include <components/sceneutil/visitor.hpp>
 #include <components/settings/values.hpp>
 #include <components/stereo/multiview.hpp>
+#ifdef OPENMW_PLATFORM_3DS
+#include <components/render3ds/render3ds.hpp>
+#endif
 
 #include "../mwbase/environment.hpp"
 #include "../mwbase/windowmanager.hpp"
@@ -181,6 +185,12 @@ namespace MWRender
 
     void LocalMap::requestMap(const MWWorld::CellStore* cell)
     {
+#ifdef OPENMW_PLATFORM_3DS
+        // No tile drawn unless a map is turned on (Options > Experimental, off by default: the flashing and the short
+        // freezes of test #106 follow the tiles' drawing).
+        if (!Settings::map().mMinimap3DS && !Settings::map().mFullMap3DS)
+            return;
+#endif
         if (!cell->isExterior())
         {
             requestInteriorMap(cell);
@@ -248,6 +258,26 @@ namespace MWRender
 
     void LocalMap::cleanupCameras()
     {
+#ifdef OPENMW_PLATFORM_3DS
+        // M19: the 3DS draws one tile at a time into one target (render3ds backend): the first tile not yet drawn
+        // is culled, the others wait (node mask 0), and a camera goes once its texture is ready, not after one frame.
+        bool drawing = false;
+        for (auto it = mLocalMapRTTs.begin(); it != mLocalMapRTTs.end();)
+        {
+            LocalMapRenderToTexture* rtt = it->get();
+            if (Render3DS::mapTileReady(rtt->getColorTexture(nullptr)))
+            {
+                rtt->mActive = false;
+                mRoot->removeChild(rtt);
+                it = mLocalMapRTTs.erase(it);
+                continue;
+            }
+            rtt->setNodeMask(drawing ? 0 : Mask_RenderToTexture);
+            drawing = true;
+            ++it;
+        }
+        return;
+#endif
         auto it = mLocalMapRTTs.begin();
         while (it != mLocalMapRTTs.end())
         {
@@ -507,6 +537,34 @@ namespace MWRender
             v = 1.0f - std::abs((pos.y() - (mMapWorldSize * y)) / mMapWorldSize);
         }
 
+#ifdef OPENMW_PLATFORM_3DS
+        // Perf batch 5: the fog of war only clears around the player, so standing still (in the same place, with
+        // no new map segment) changes nothing: the loop below walks every texel of up to 9 segments a frame (~1% of
+        // the main thread in Zeste, Pelagiad).
+        // The segments around the player that have a fog image count too (one made while standing still).
+        {
+            static osg::Vec2f lastPos(std::numeric_limits<float>::max(), 0.f);
+            static bool lastInterior = false;
+            static size_t lastSegments = 0;
+            static int lastFogImages = -1;
+            const auto& all = mInterior ? mInteriorSegments : mExteriorSegments;
+            int fogImages = 0;
+            for (int mx = -mCellDistance; mx <= mCellDistance; ++mx)
+                for (int my = -mCellDistance; my <= mCellDistance; ++my)
+                {
+                    const auto found = all.find(std::make_pair(x + mx, y - my));
+                    if (found != all.end() && found->second.mFogOfWarImage && found->second.mMapTexture)
+                        ++fogImages;
+                }
+            if (pos == lastPos && mInterior == lastInterior && all.size() == lastSegments
+                && fogImages == lastFogImages)
+                return;
+            lastPos = pos;
+            lastInterior = mInterior;
+            lastSegments = all.size();
+            lastFogImages = fogImages;
+        }
+#endif
         // explore radius (squared)
         const float exploreRadius = 0.17f * (sFogOfWarResolution - 1); // explore radius from 0 to sFogOfWarResolution-1
         const float sqrExploreRadius = square(exploreRadius);
@@ -730,6 +788,9 @@ namespace MWRender
         camera->setClearColor(osg::Vec4(0.f, 0.f, 0.f, 1.f));
         camera->setClearMask(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
         camera->setRenderOrder(osg::Camera::PRE_RENDER);
+#ifdef OPENMW_PLATFORM_3DS
+        camera->setName("LocalMap"); // the render3ds backend draws it (M19)
+#endif
 
         camera->setCullMask(Mask_Scene | Mask_SimpleWater | Mask_Terrain | Mask_Object | Mask_Static);
         camera->setCullMaskLeft(Mask_Scene | Mask_SimpleWater | Mask_Terrain | Mask_Object | Mask_Static);
@@ -774,10 +835,12 @@ namespace MWRender
 
     void CameraLocalUpdateCallback::operator()(LocalMapRenderToTexture* node, osg::NodeVisitor* nv)
     {
+#ifndef OPENMW_PLATFORM_3DS // the 3DS keeps a tile's camera until its texture is ready (LocalMap::cleanupCameras)
         if (!node->mActive)
             node->setNodeMask(0);
 
         node->mActive = false;
+#endif
 
         // Rtt-nodes do not forward update traversal to their cameras so we can traverse safely.
         // Traverse in case there are nested callbacks.

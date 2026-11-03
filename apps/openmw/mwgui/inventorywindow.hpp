@@ -8,7 +8,13 @@
 
 #include <components/misc/notnullptr.hpp>
 
+#include "../n3ds/menufriend.hpp"
 #include <osg/Vec2i>
+
+namespace osg
+{
+    class Group;
+}
 
 #include <memory>
 
@@ -33,6 +39,8 @@ namespace MWGui
 
     class InventoryWindow : public WindowPinnableBase
     {
+        OMW3DS_MENU_FRIEND
+        OMW3DS_HUD_FRIEND
     public:
         explicit InventoryWindow(DragAndDrop& dragAndDrop, ItemTransfer& itemTransfer);
         ~InventoryWindow() override;
@@ -118,6 +126,12 @@ namespace MWGui
 
         bool mTrading;
         bool mUpdateNextFrame;
+#ifdef OPENMW_PLATFORM_3DS
+        // The paper doll (the player's model in its own render-to-texture scene, ~6 MB and ~1.3 s to build) is
+        // built when this window opens: the 3DS shows the inventory as the bottom screen's Items tab, without it.
+        bool mPreviewStale3DS = true;
+        void rebuildPreview3DS();
+#endif
 
         void toggleMaximized();
 

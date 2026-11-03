@@ -7,6 +7,7 @@
 #include <MyGUI_ImageBox.h>
 #include <MyGUI_InputManager.h>
 #include <MyGUI_LanguageManager.h>
+#include <MyGUI_TextBox.h>
 #include <MyGUI_UString.h>
 
 #include <components/debug/debuglog.hpp>
@@ -29,6 +30,10 @@
 #include "../mwstate/character.hpp"
 
 #include "confirmationdialog.hpp"
+
+#ifdef OPENMW_PLATFORM_3DS
+#include "../n3ds/frame3ds.hpp"
+#endif
 
 namespace MWGui
 {
@@ -58,6 +63,10 @@ namespace MWGui
         mSaveList->eventKeyButtonPressed += MyGUI::newDelegate(this, &SaveGameDialog::onKeyButtonPressed);
         mSaveNameEdit->eventEditSelectAccept += MyGUI::newDelegate(this, &SaveGameDialog::onEditSelectAccept);
         mSaveNameEdit->eventEditTextChange += MyGUI::newDelegate(this, &SaveGameDialog::onSaveNameChanged);
+#ifdef OPENMW_PLATFORM_3DS
+        // M8: the name typed on the system keyboard (the box is static in the 3DS layout).
+        mSaveNameEdit->eventMouseButtonClick += MyGUI::newDelegate(this, &SaveGameDialog::onSaveNameClicked3DS);
+#endif
 
         // To avoid accidental deletions
         mDeleteButton->setNeedKeyFocus(false);
@@ -259,6 +268,12 @@ namespace MWGui
 
         mDeleteButton->setUserString("Hidden", load ? "false" : "true");
         mDeleteButton->setVisible(load);
+#ifdef OPENMW_PLATFORM_3DS
+        // M19: the bottom screen's title (the two-screen layout, packaging/ui3ds).
+        MyGUI::TextBox* title = nullptr;
+        getWidget(title, "Title3DS");
+        title->setCaptionWithReplacing(load ? "#{OMW3DS:LoadGame}" : "#{OMW3DS:SaveGame}");
+#endif
 
         if (!load)
         {
@@ -266,6 +281,20 @@ namespace MWGui
         }
 
         center();
+    }
+
+    void SaveGameDialog::onSaveNameClicked3DS(MyGUI::Widget* /*sender*/)
+    {
+#ifdef OPENMW_PLATFORM_3DS
+        omw3ds::deferToFrame([this] {
+            std::string text = mSaveNameEdit->getCaption().asUTF8();
+            if (omw3ds::systemKeyboard("Save name", text, 48))
+            {
+                mSaveNameEdit->setCaption(MyGUI::UString(text));
+                onSaveNameChanged(mSaveNameEdit);
+            }
+        });
+#endif
     }
 
     void SaveGameDialog::onCancelButtonClicked(MyGUI::Widget* /*sender*/)
@@ -411,6 +440,14 @@ namespace MWGui
     {
         mOkButton->setEnabled(pos != MyGUI::ITEM_NONE || mSaving);
         mDeleteButton->setEnabled(pos != MyGUI::ITEM_NONE);
+#ifdef OPENMW_PLATFORM_3DS
+        {
+            // M19: the top screen's details panel only with a save selected (no empty frame over the game).
+            MyGUI::Widget* details = nullptr;
+            getWidget(details, "Details3DS");
+            details->setVisible(pos != MyGUI::ITEM_NONE && mCurrentCharacter);
+        }
+#endif
 
         if (pos == MyGUI::ITEM_NONE || !mCurrentCharacter)
         {
@@ -465,12 +502,21 @@ namespace MWGui
                     mCurrentSlot->mProfile.mInGameTime.mMonth)
              << " " << hour << " " << (pm ? "#{Calendar:pm}" : "#{Calendar:am}") << "\n";
 
+#ifndef OPENMW_PLATFORM_3DS // the time played: left out of the save details on the 3DS (the tester, 20/10)
         if (mCurrentSlot->mProfile.mTimePlayed > 0)
+#else
+        if (false)
+#endif
         {
             text << "#{OMWEngine:TimePlayed}: " << formatTimeplayed(mCurrentSlot->mProfile.mTimePlayed) << "\n";
         }
 
-        text << Misc::fileTimeToString(mCurrentSlot->mTimeStamp, "%Y.%m.%d %T") << "\n";
+#ifdef OPENMW_PLATFORM_3DS
+        // The save's date comes from the SD card's file time. Where it's unknown (emulators: 1970 or 2000), no
+        // date rather than a wrong one.
+        if (Misc::toTimeT(mCurrentSlot->mTimeStamp) > 946771200) // 02/01/2000
+#endif
+            text << Misc::fileTimeToString(mCurrentSlot->mTimeStamp, "%Y.%m.%d %T") << "\n";
 
         mCellName->setCaptionWithReplacing(std::format("#{{sCell={}}}", mCurrentSlot->mProfile.mPlayerCellName));
         mInfoText->setCaptionWithReplacing(text.str());

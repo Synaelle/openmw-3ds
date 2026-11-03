@@ -1,4 +1,5 @@
 #include "physicssystem.hpp"
+#include <components/misc/omw3dsdetail.hpp>
 
 #include <algorithm>
 #include <memory>
@@ -126,6 +127,10 @@ namespace MWPhysics
         }
 
         mTaskScheduler = std::make_unique<PhysicsTaskScheduler>(mPhysicsDt, mCollisionWorld.get());
+#ifdef OPENMW_PLATFORM_3DS
+        // Single precision on the 3DS (cmake/openmw-3ds-cache.cmake).
+        Log(Debug::Info) << "Bullet: " << (sizeof(btScalar) == sizeof(double) ? "double" : "single") << " precision";
+#endif
     }
 
     PhysicsSystem::~PhysicsSystem()
@@ -554,6 +559,7 @@ namespace MWPhysics
 
     void PhysicsSystem::addActor(const MWWorld::Ptr& ptr, VFS::Path::NormalizedView mesh)
     {
+        OMW3DS_DETAIL("phys.addActor");
         const VFS::Path::Normalized animationMesh
             = Misc::ResourceHelpers::correctActorModelPath(mesh, mResourceSystem->getVFS());
         std::shared_ptr<const Resource::BulletShape> shape = mShapeManager->getShape(animationMesh);

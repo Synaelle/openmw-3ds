@@ -118,6 +118,23 @@ add_openmw_dir (mwbase
 
 # Main executable
 
+if (OPENMW_PLATFORM_3DS)
+    # Nintendo 3DS: no OpenAL, FFmpeg or video playback. Replacements live in apps/openmw/n3ds/: sound through the
+    # DSP (NDSP) with WAV and MP3 (mpg123) decoding.
+    list(FILTER OPENMW_FILES EXCLUDE REGEX "mwsound/(openaloutput|ffmpegdecoder|movieaudiofactory|alext|efx|efxpresets)\\.[ch]pp$")
+    list(FILTER OPENMW_FILES EXCLUDE REGEX "mwgui/videowidget\\.cpp$")
+    list(APPEND OPENMW_FILES n3ds/sound3ds.hpp n3ds/ndspoutput.cpp n3ds/sounddecoder3ds.cpp n3ds/videowidget_null.cpp
+        n3ds/main3ds.cpp n3ds/frame3ds.cpp n3ds/hydration.cpp n3ds/menus.cpp n3ds/hud3ds.cpp n3ds/memrelief.cpp
+        n3ds/credits3ds.cpp)
+    if (OPENMW3DS_DEBUG) # debug tools: autorun scripts, scripted input, teleport buttons
+        list(APPEND OPENMW_FILES n3ds/debugtools.cpp n3ds/hidinject.cpp n3ds/benchmark3ds.cpp)
+    endif()
+    # Per-frame hot code at -O2 (the rest stays -Os: image size is memory): animation, physics, AI.
+    set(OMW3DS_HOT_FILES ${OPENMW_FILES})
+    list(FILTER OMW3DS_HOT_FILES INCLUDE REGEX "/(mwrender|mwphysics|mwmechanics)/[^/]*\\.cpp$")
+    set_source_files_properties(${OMW3DS_HOT_FILES} PROPERTIES COMPILE_OPTIONS "-O2")
+endif()
+
 add_library(openmw-lib STATIC
     ${OPENMW_FILES}
     ${OPENMW_SOURCES}
@@ -155,6 +172,36 @@ if(BUILD_OPENMW)
 
     target_link_libraries(openmw openmw-lib)
 
+    if (OPENMW_PLATFORM_3DS)
+        include(${OPENMW3DS_ROOT}/cmake/Ctr3dsPackaging.cmake)
+        # A test build is its own title next to the player's, marked on the HOME Menu (CMakeLists.txt: its own
+        # folder on the SD card, OPENMW3DS_SD_DIR, and ID).
+        if (OPENMW3DS_DEBUG)
+            set(_omw3ds_title "OpenMW Test")
+            set(_omw3ds_code "CTR-P-OMW4")
+            set(_omw3ds_art ICON "${OPENMW3DS_ROOT}/packaging/icon_test.png"
+                BANNER "${OPENMW3DS_ROOT}/packaging/banner_test.png")
+        else()
+            set(_omw3ds_title "OpenMW")
+            set(_omw3ds_code "CTR-P-OMW3")
+            set(_omw3ds_art)
+        endif()
+        omw3ds_package(openmw
+            TITLE "${_omw3ds_title}"
+            DESCRIPTION "OpenMW engine port for New 3DS" # no game name in the title metadata (the tester, 20/10)
+            AUTHOR "Synaelle" # the tester (the port's author), 22/10/2026
+            PRODUCT_CODE "${_omw3ds_code}"
+            UNIQUE_ID ${OPENMW3DS_UNIQUE_ID} # the game checks it (n3ds/main3ds.cpp)
+            SYSTEM_MODE_EXT 178MB
+            VERSION "${OPENMW3DS_VERSION}"
+            ${_omw3ds_art})
+        # Scripted input for automated emulator runs (n3ds/hidinject.cpp, debug tools).
+        if (OPENMW3DS_DEBUG)
+            target_link_options(openmw PRIVATE
+                "LINKER:--wrap=hidKeysDown,--wrap=hidKeysUp,--wrap=hidKeysHeld,--wrap=hidCircleRead,--wrap=irrstCstickRead,--wrap=hidTouchRead")
+        endif()
+    endif()
+
     # Workaround necessary to ensure osgAnimation::MatrixLinearSampler dynamic casts work under Clang
     # NOTE: it's unclear whether the broken behavior is spec-compliant
     if (CMAKE_CXX_COMPILER_ID STREQUAL Clang)
@@ -186,10 +233,27 @@ target_link_libraries(openmw-lib
     ${MyGUI_LIBRARIES}
     SDL2::SDL2
     ${RecastNavigation_LIBRARIES}
-    osg-ffmpeg-videoplayer
     oics
     components
 )
+if (OPENMW_PLATFORM_3DS)
+    # Our mpg123 (deps/build-deps.sh: integer decoder, ARM synth), not devkitPro's floating-point 3ds-mpg123. Its
+    # header is found first too (.deps/3ds/include comes before the portlibs).
+    # ICU's data (English, deps/build-deps.sh build_icudata), embedded and registered at start-up (main3ds.cpp):
+    # ICU's own data library is a stub with archive packaging. 16-byte aligned, as udata_setCommonData needs.
+    set(OPENMW3DS_ICU_DATA "${OPENMW3DS_DEPS_PREFIX}/share/icu/73.2/en/icudt73l.dat")
+    if (NOT EXISTS "${OPENMW3DS_ICU_DATA}")
+        message(FATAL_ERROR "${OPENMW3DS_ICU_DATA} missing: run scripts/build-deps.ps1 icudata")
+    endif()
+    set(DKP_BIN2S_ALIGNMENT 16)
+    dkp_add_embedded_binary_library(openmw3ds_icudata "${OPENMW3DS_ICU_DATA}")
+    target_link_libraries(openmw-lib platform3ds openmw3ds_icudata
+        ${OPENMW3DS_DEPS_PREFIX}/lib/libcompat3ds.a # POSIX stubs (fchown, geteuid)
+        ${OPENMW3DS_DEPS_PREFIX}/lib/libmpg123.a
+        bz2)                                       # needed by freetype
+else()
+    target_link_libraries(openmw-lib osg-ffmpeg-videoplayer)
+endif()
 
 if (MSVC AND PRECOMPILE_HEADERS_WITH_MSVC)
     target_precompile_headers(openmw-lib PRIVATE

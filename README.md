@@ -1,128 +1,80 @@
-OpenMW
-======
+<h1 align="center">OpenMW port for the (New) 3DS</h1>
 
-OpenMW is an open-source open-world RPG game engine that supports playing Morrowind by Bethesda Softworks. You need to own the game for OpenMW to play Morrowind.
+<p align="center">
+  <a href="QA.md">Q/A</a> ·
+  <a href="BUG_REPORT.md">Bug report</a> ·
+  <a href="ROADMAP.md">Roadmap</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
 
-OpenMW also comes with OpenMW-CS, a replacement for Bethesda's Construction Set.
+[OpenMW](https://openmw.org) (Morrowind's open-source engine) for the New 3DS.
 
-* Version: 0.52.0
-* License: GPLv3 (see [LICENSE](https://gitlab.com/OpenMW/openmw/-/raw/master/LICENSE) for more information)
-* Website: https://www.openmw.org
-* IRC: [#openmw on irc.libera.chat](https://web.libera.chat/#openmw)
-* Discord: [official server](https://discord.com/servers/openmw-260439894298460160)
-* Matrix #openmw-space:openmw.org
-* _Note_: IRC, Discord, and Matrix are bridged to each other.
+> [!CAUTION]
+> No assets from the game are provided here. You need your own legally owned copy of Morrowind for PC (Steam, GOG or
+> the disc), and the setup app turns its files into what the 3DS needs. This is an unofficial fan project, not
+> affiliated with or endorsed by Bethesda Softworks, ZeniMax Media or Nintendo.
 
-Font Licenses:
-* DejaVuLGCSansMono.ttf: custom (see [files/data/fonts/DejaVuFontLicense.txt](https://gitlab.com/OpenMW/openmw/-/raw/master/files/data/fonts/DejaVuFontLicense.txt) for more information)
-* DemonicLetters.ttf: SIL Open Font License (see [files/data/fonts/DemonicLettersFontLicense.txt](https://gitlab.com/OpenMW/openmw/-/raw/master/files/data/fonts/DemonicLettersFontLicense.txt) for more information)
-* MysticCards.ttf: SIL Open Font License (see [files/data/fonts/MysticCardsFontLicense.txt](https://gitlab.com/OpenMW/openmw/-/raw/master/files/data/fonts/MysticCardsFontLicense.txt) for more information)
+> [!WARNING]
+> The port is experimental, but the main quest should be completable from start to finish. Some side quests may have
+> issues. If you run into one, please [report it](BUG_REPORT.md).
 
-Current Status
---------------
+## What you need
 
-The main quests in Morrowind, Tribunal and Bloodmoon are all completable. Some issues with side quests are to be expected (but rare). Check the [bug tracker](https://gitlab.com/OpenMW/openmw/-/issues/?milestone_title=openmw-1.0) for a list of issues we need to resolve before the "1.0" release. Even before the "1.0" release, however, OpenMW boasts some new [features](https://wiki.openmw.org/index.php?title=Features), such as improved graphics and user interfaces.
+* A New 3DS, New 3DS XL or New 2DS XL with custom firmware. A port for the original 3DS and 2DS is in the works.
+* Morrowind for PC, in English, French or German. Other languages will get support later.
+* A computer running Windows, macOS or Linux for the setup app.
 
-Pre-existing modifications created for the original Morrowind engine can be hit-and-miss. The OpenMW script compiler performs more thorough error-checking than Morrowind does, meaning that a mod created for Morrowind may not necessarily run in OpenMW. Some mods also rely on quirky behaviour or engine bugs in order to work. We are considering such compatibility issues on a case-by-case basis - in some cases adding a workaround to OpenMW may be feasible, in other cases fixing the mod will be the only option. If you know of any mods that work or don't work, feel free to add them to the [Mod status](https://wiki.openmw.org/index.php?title=Mod_status) wiki page.
+## Getting started
 
-Platform Support
-------------------
+1. Download the [latest release](https://github.com/Synaelle/openmw-3ds/releases/latest) and run the setup app. It
+   finds your Morrowind and prepares everything.
+2. Copy the folder it makes to your SD card.
+3. Install the CIA. Scan the code the setup app shows with [FBI](https://github.com/Steveice10/FBI/releases/latest),
+   or install the file with FBI or [Cement](https://github.com/Synaelle/cement/releases/latest). Then start OpenMW.
+   The first launch takes a while.
 
-The officially supported platforms at this time are:
+To update, run the new version's setup app. It only prepares what changed.
 
-- Windows 10 or later
-- macOS 14.8 or later
-- Linux
+## What to expect
 
-We do not support 32-bit platforms.
+Tribunal and Bloodmoon aren't supported yet, and there are no shadows, water reflections or distant land, which the
+3DS can't afford. Loading a new place takes a few seconds. Everything we know about is in
+[KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
-We welcome efforts to add more supported platforms!
+## Building
 
-Getting Started
----------------
+The port builds on Windows, in PowerShell, from the repository's root. Everything specific to the 3DS is in the `3ds`
+folder, and OpenMW's own code is at the root.
 
-* [Installation instructions](https://openmw.readthedocs.io/en/latest/manuals/installation/index.html)
-* [Build from source](https://wiki.openmw.org/index.php?title=Development_Environment_Setup)
-* [Report a bug](https://gitlab.com/OpenMW/openmw/issues) - read the [guidelines](https://wiki.openmw.org/index.php?title=Bug_Reporting_Guidelines) before submitting your first bug!
-* [Known issues](https://gitlab.com/OpenMW/openmw/issues?label_name%5B%5D=Bug)
+1. Install the tools (MSYS2, devkitPro's 3DS toolchain and libraries, makerom and bannertool) and the Python
+   packages the tools use. It's safe to run again.
+   ```powershell
+   3ds\scripts\bootstrap.ps1
+   ```
+2. Build OpenMW's dependencies for the 3DS (OpenSceneGraph, Bullet, Boost, ICU, SQLite and a few more). This takes a
+   while the first time.
+   ```powershell
+   3ds\scripts\build-deps.ps1
+   ```
+3. Build the game. The CIA ends up in `3ds\build\openmw\apps\openmw\openmw.cia`.
+   ```powershell
+   3ds\scripts\build-openmw.ps1
+   ```
+   This is a test build, with debug tools. Add `-NoDebug` for a build like the releases.
 
-Contributing
----------
+Releases are built on GitHub and GitLab from a version tag. Each one builds the CIA, the setup apps and the
+packages, then publishes the release once every build is done. The setup app (Rust and Tauri) has its own
+instructions in [3ds/setup](3ds/setup/README.md).
 
-Not sure what to do with all your free time? OpenMW is always looking for new contributions. [See here for how to contribute.](./CONTRIBUTING.md)
+## Contributing
 
-The data path
--------------
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-The data path tells OpenMW where to find your Morrowind files. If you run the launcher, OpenMW should be able to pick up the location of these files on its own, if both Morrowind and OpenMW are installed properly (installing Morrowind under WINE is considered a proper install).
+## Credits
 
-Command line options
---------------------
+This port stands on the work of many people. See [CREDITS.md](CREDITS.md).
 
-    Syntax: openmw <options>
-    Allowed options:
-      --config arg                          additional config directories
-      --replace arg                         settings where the values from the
-                                            current source should replace those
-                                            from lower-priority sources instead of
-                                            being appended
-      --user-data arg                       set user data directory (used for
-                                            saves, screenshots, etc)
-      --resources arg (=resources)          set resources directory
-      --help                                print help message
-      --version                             print version information and quit
-      --data arg (=data)                    set data directories (later directories
-                                            have higher priority)
-      --data-local arg                      set local data directory (highest
-                                            priority)
-      --fallback-archive arg (=fallback-archive)
-                                            set fallback BSA archives (later
-                                            archives have higher priority)
-      --start arg                           set initial cell
-      --content arg                         content file(s): esm/esp, or
-                                            omwgame/omwaddon/omwscripts
-      --groundcover arg                     groundcover content file(s): esm/esp,
-                                            or omwgame/omwaddon
-      --no-sound [=arg(=1)] (=0)            disable all sounds
-      --script-all [=arg(=1)] (=0)          compile all scripts (excluding dialogue
-                                            scripts) at startup
-      --script-all-dialogue [=arg(=1)] (=0) compile all dialogue scripts at startup
-      --script-console [=arg(=1)] (=0)      enable console-only script
-                                            functionality
-      --script-run arg                      select a file containing a list of
-                                            console commands that is executed on
-                                            startup
-      --script-warn [=arg(=1)] (=1)         handling of warnings when compiling
-                                            scripts
-                                            0 - ignore warnings
-                                            1 - show warnings but consider script as
-                                            correctly compiled anyway
-                                            2 - treat warnings as errors
-      --load-savegame arg                   load a save game file on game startup
-                                            (specify an absolute filename or a
-                                            filename relative to the current
-                                            working directory)
-      --skip-menu [=arg(=1)] (=0)           skip main menu on game startup
-      --new-game [=arg(=1)] (=0)            run new game sequence (ignored if
-                                            skip-menu=0)
-      --encoding arg (=win1252)             Character encoding used in OpenMW game
-                                            messages:
+## License
 
-                                            win1250 - Central and Eastern European
-                                            such as Polish, Czech, Slovak,
-                                            Hungarian, Slovene, Bosnian, Croatian,
-                                            Serbian (Latin script), Romanian and
-                                            Albanian languages
-
-                                            win1251 - Cyrillic alphabet such as
-                                            Russian, Bulgarian, Serbian Cyrillic
-                                            and other languages
-
-                                            win1252 - Western European (Latin)
-                                            alphabet, used by default
-      --fallback arg                        fallback values
-      --no-grab [=arg(=1)] (=0)             Don't grab mouse cursor
-      --export-fonts [=arg(=1)] (=0)        Export Morrowind .fnt fonts to PNG
-                                            image and XML file in current directory
-      --activate-dist arg (=-1)             activation distance override
-      --random-seed arg (=<impl defined>)   seed value for random number generator
+GNU General Public License v3.0, like OpenMW. The Elder Scrolls III: Morrowind is © Bethesda Softworks LLC, a ZeniMax
+Media company.

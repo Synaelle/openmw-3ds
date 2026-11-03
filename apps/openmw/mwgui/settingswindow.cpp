@@ -1,15 +1,19 @@
 #include "settingswindow.hpp"
 
+#include <algorithm>
 #include <array>
+#include <functional>
 
 #include <unicode/locid.h>
 
 #include <MyGUI_ComboBox.h>
 #include <MyGUI_Gui.h>
 #include <MyGUI_LanguageManager.h>
+#include <MyGUI_LayerManager.h>
 #include <MyGUI_ScrollBar.h>
 #include <MyGUI_ScrollView.h>
 #include <MyGUI_TabControl.h>
+#include <MyGUI_TabItem.h>
 #include <MyGUI_UString.h>
 #include <MyGUI_Window.h>
 
@@ -182,6 +186,15 @@ namespace MWGui
                 if (init)
                     current->eventMouseButtonClick += MyGUI::newDelegate(this, &SettingsWindow::onButtonToggled);
             }
+#ifdef OPENMW_PLATFORM_3DS
+            // A level button (M19: [Camera] small details): Low, Medium, High. A touch or A goes to the next.
+            if (type == "Level3DS")
+            {
+                setLevelCaption3DS(current);
+                if (init)
+                    current->eventMouseButtonClick += MyGUI::newDelegate(this, &SettingsWindow::onLevelClicked3DS);
+            }
+#endif
             if (type == sliderType)
             {
                 MyGUI::ScrollBar* scroll = current->castType<MyGUI::ScrollBar>();
@@ -499,13 +512,31 @@ namespace MWGui
         }
 
         mControllerButtons.mA = "#{Interface:Select}";
+#ifdef OPENMW_PLATFORM_3DS
+        mControllerButtons.mB = "#{Interface:Back}"; // B leaves the window (M19: "B OK" read oddly)
+#else
         mControllerButtons.mB = "#{Interface:OK}";
+#endif
+#ifdef OPENMW_PLATFORM_3DS
+        // M17: the D-pad's highlight instead of the circle pad's cursor. The controls list is the controller's.
+        mControllerButtons.mDpad = "#{OMW3DS:Move}";
+        mControllerButtons.mR1 = "#{OMW3DS:Tabs}";
+        mDisableGamepadCursor = true;
+        mFocusFrame3DS = mMainWidget->castType<MyGUI::Window>()->getClientWidget()->createWidget<MyGUI::Widget>(
+            "MW_Box", MyGUI::IntCoord(0, 0, 10, 10), MyGUI::Align::Default);
+        mFocusFrame3DS->setNeedMouseFocus(false);
+        mFocusFrame3DS->setVisible(false);
+#else
         mControllerButtons.mLStick = "#{Interface:Mouse}";
+#endif
     }
 
     void SettingsWindow::onTabChanged(MyGUI::TabControl* /*sender*/, size_t /*index*/)
     {
         resetScrollbars();
+#ifdef OPENMW_PLATFORM_3DS
+        collectFocusables3DS(false);
+#endif
     }
 
     void SettingsWindow::onOkButtonClicked(MyGUI::Widget* /*sender*/)
@@ -706,6 +737,31 @@ namespace MWGui
             return;
         }
     }
+
+#ifdef OPENMW_PLATFORM_3DS
+    void SettingsWindow::setLevelCaption3DS(MyGUI::Widget* button)
+    {
+        static constexpr std::string_view captions[] = { "#{OMW3DS:LevelLow}", "#{OMW3DS:LevelMedium}",
+            "#{OMW3DS:LevelHigh}" };
+        const int level = std::clamp(Settings::get<int>(getSettingCategory(button), getSettingName(button)).get(), 0, 2);
+        button->castType<MyGUI::Button>()->setCaptionWithReplacing(std::string(captions[level]));
+    }
+
+    void SettingsWindow::changeLevel3DS(MyGUI::Widget* button, int step)
+    {
+        auto& setting = Settings::get<int>(getSettingCategory(button), getSettingName(button));
+        const int level = std::clamp(setting.get(), 0, 2);
+        // A or a touch (step 0) goes round, Low after High. The D-pad stops at either end.
+        setting.set(step == 0 ? (level + 1) % 3 : std::clamp(level + step, 0, 2));
+        setLevelCaption3DS(button);
+        apply();
+    }
+
+    void SettingsWindow::onLevelClicked3DS(MyGUI::Widget* sender)
+    {
+        changeLevel3DS(sender, 0);
+    }
+#endif
 
     void SettingsWindow::onTextureFilteringChanged(MyGUI::ComboBox* /*sender*/, size_t pos)
     {
@@ -1177,6 +1233,9 @@ namespace MWGui
         resetScrollbars();
         renderScriptSettings();
         MWBase::Environment::get().getWindowManager()->setKeyFocusWidget(mOkButton);
+#ifdef OPENMW_PLATFORM_3DS
+        collectFocusables3DS(false);
+#endif
     }
 
     void SettingsWindow::onClose()
@@ -1237,6 +1296,9 @@ namespace MWGui
             index = wrap(index, mSettingsTab->getItemCount(), -1);
             mSettingsTab->setIndexSelected(index);
             MWBase::Environment::get().getWindowManager()->playSound(ESM::RefId::stringRefId("Menu Click"));
+#ifdef OPENMW_PLATFORM_3DS
+            collectFocusables3DS(false); // setIndexSelected doesn't send eventTabChangeSelect
+#endif
             return true;
         }
         else if (arg.button == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)
@@ -1245,10 +1307,112 @@ namespace MWGui
             index = wrap(index, mSettingsTab->getItemCount(), 1);
             mSettingsTab->setIndexSelected(index);
             MWBase::Environment::get().getWindowManager()->playSound(ESM::RefId::stringRefId("Menu Click"));
+#ifdef OPENMW_PLATFORM_3DS
+            collectFocusables3DS(false); // setIndexSelected doesn't send eventTabChangeSelect
+#endif
             return true;
         }
+#ifdef OPENMW_PLATFORM_3DS
+        if (!mFocusables3DS.empty())
+        {
+            switch (arg.button)
+            {
+                case SDL_CONTROLLER_BUTTON_DPAD_UP:
+                    mFocus3DS = wrap(mFocus3DS, mFocusables3DS.size(), -1);
+                    showFocus3DS();
+                    return true;
+                case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+                    mFocus3DS = wrap(mFocus3DS, mFocusables3DS.size(), 1);
+                    showFocus3DS();
+                    return true;
+                case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+                    useFocus3DS(-1);
+                    return true;
+                case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+                    useFocus3DS(1);
+                    return true;
+                case SDL_CONTROLLER_BUTTON_A:
+                    useFocus3DS(0);
+                    return true;
+                default:
+                    break;
+            }
+        }
+#endif
 
         return false;
     }
+
+#ifdef OPENMW_PLATFORM_3DS
+    void SettingsWindow::collectFocusables3DS(bool keepFocus)
+    {
+        const size_t previous = mFocus3DS;
+        mFocusables3DS.clear();
+        const size_t tab = mSettingsTab->getIndexSelected();
+        if (tab != MyGUI::ITEM_NONE)
+        {
+            std::function<void(MyGUI::Widget*)> walk = [&](MyGUI::Widget* widget) {
+                for (size_t i = 0; i < widget->getChildCount(); ++i)
+                {
+                    MyGUI::Widget* child = widget->getChildAt(i);
+                    if (!child->getVisible())
+                        continue;
+                    const std::string_view type = child->getUserString("SettingType");
+                    if (type == "Slider" || type == "CheckButton" || type == "Level3DS")
+                        mFocusables3DS.push_back(child);
+                    walk(child);
+                }
+            };
+            walk(mSettingsTab->getItemAt(tab));
+        }
+        mFocus3DS = keepFocus && previous < mFocusables3DS.size() ? previous : 0;
+        showFocus3DS();
+    }
+
+    void SettingsWindow::showFocus3DS()
+    {
+        if (mFocusables3DS.empty())
+        {
+            mFocusFrame3DS->setVisible(false);
+            return;
+        }
+        MyGUI::Widget* focused = mFocusables3DS[mFocus3DS];
+        // A frame around the option's line (its label and its control).
+        MyGUI::Widget* line = focused;
+        const std::string_view focusedType = focused->getUserString("SettingType");
+        if ((focusedType == "CheckButton" || focusedType == "Level3DS") && focused->getParent() != nullptr)
+            line = focused->getParent(); // the button and its label's box
+        const MyGUI::IntCoord client = mFocusFrame3DS->getParent()->getAbsoluteCoord();
+        const MyGUI::IntCoord at = line->getAbsoluteCoord();
+        mFocusFrame3DS->setCoord(at.left - client.left - 3, at.top - client.top - 3, at.width + 6, at.height + 6);
+        mFocusFrame3DS->setVisible(true);
+        MyGUI::LayerManager::getInstance().upLayerItem(mFocusFrame3DS);
+    }
+
+    void SettingsWindow::useFocus3DS(int step)
+    {
+        if (mFocusables3DS.empty())
+            return;
+        MyGUI::Widget* focused = mFocusables3DS[mFocus3DS];
+        const std::string_view type = focused->getUserString("SettingType");
+        if (type == "Slider")
+        {
+            if (step == 0)
+                return;
+            MyGUI::ScrollBar* slider = focused->castType<MyGUI::ScrollBar>();
+            const size_t range = slider->getScrollRange();
+            const size_t stride = std::max<size_t>(slider->getScrollPage(), range / 20);
+            const long position = std::clamp<long>(
+                static_cast<long>(slider->getScrollPosition()) + step * static_cast<long>(stride), 0,
+                static_cast<long>(range) - 1);
+            slider->setScrollPosition(static_cast<size_t>(position));
+            onSliderChangePosition(slider, static_cast<size_t>(position));
+        }
+        else if (type == "CheckButton")
+            onButtonToggled(focused);
+        else if (type == "Level3DS")
+            changeLevel3DS(focused, step);
+    }
+#endif
 
 }

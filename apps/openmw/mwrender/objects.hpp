@@ -4,6 +4,9 @@
 #include <map>
 #include <memory>
 #include <string>
+#ifdef OPENMW_PLATFORM_3DS
+#include <utility>
+#endif
 
 #include <osg/ref_ptr>
 
@@ -40,6 +43,10 @@ namespace MWRender
 
         typedef std::map<const MWWorld::CellStore*, osg::ref_ptr<osg::Group>> CellMap;
         CellMap mCellSceneNodes;
+#ifdef OPENMW_PLATFORM_3DS
+        // Each cell node's children: one group per area of the cell (Objects::insertBegin).
+        std::map<const MWWorld::CellStore*, std::map<std::pair<int, int>, osg::ref_ptr<osg::Group>>> mCellAreas;
+#endif
         PtrAnimationMap mObjects;
         osg::ref_ptr<osg::Group> mRootNode;
         Resource::ResourceSystem* mResourceSystem;

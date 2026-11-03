@@ -1,5 +1,12 @@
 #include "actors.hpp"
 
+#ifdef OPENMW_PLATFORM_3DS
+#include <platform3ds/memprobe.hpp>
+#define OMW3DS_MECH_PHASE(label) p3ds::perf::Phase omw3dsMechPhase(label)
+#else
+#define OMW3DS_MECH_PHASE(label)
+#endif
+
 #include <array>
 #include <optional>
 
@@ -1604,7 +1611,11 @@ namespace MWMechanics
                     const bool cellChanged = worldScene->hasCellChanged();
                     const MWWorld::Ptr actorPtr = actor.getPtr(); // make a copy of the map key to avoid it being
                                                                   // invalidated when the player teleports
-                    updateActor(actorPtr, duration);
+                    {
+                        // 3DS: the parts of the mechanics update, timed for frame3ds.cpp's spike report.
+                        OMW3DS_MECH_PHASE("mech.actor");
+                        updateActor(actorPtr, duration);
+                    }
 
                     // Looping magic VFX update
                     // Note: we need to do this before any of the animations are updated.
@@ -1622,6 +1633,7 @@ namespace MWMechanics
                     {
                         if (engageCombatTimerStatus == Misc::TimerStatus::Elapsed)
                         {
+                            OMW3DS_MECH_PHASE("mech.combat");
                             if (!isPlayer)
                                 adjustCommandedActor(actor.getPtr());
 
@@ -1636,7 +1648,10 @@ namespace MWMechanics
                             }
                         }
                         if (mTimerUpdateHeadTrack == 0)
+                        {
+                            OMW3DS_MECH_PHASE("mech.headtrack");
                             updateHeadTracking(actor.getPtr(), mActors, isPlayer, ctrl);
+                        }
 
                         if (actor.getPtr().getClass().isNpc() && !isPlayer)
                             updateCrimePursuit(actor.getPtr(), duration, cachedAllies);
@@ -1646,7 +1661,11 @@ namespace MWMechanics
                             CreatureStats& stats = actor.getPtr().getClass().getCreatureStats(actor.getPtr());
                             if (isConscious(actor.getPtr()) && !(luaControls && luaControls->mDisableAI))
                             {
-                                stats.getAiSequence().execute(actor.getPtr(), ctrl, duration);
+                                {
+                                    OMW3DS_MECH_PHASE("mech.ai");
+                                    stats.getAiSequence().execute(actor.getPtr(), ctrl, duration);
+                                }
+                                OMW3DS_MECH_PHASE("mech.greeting");
                                 updateGreetingState(actor.getPtr(), actor, mTimerUpdateHello > 0);
                                 playIdleDialogue(actor.getPtr());
                                 updateMovementSpeed(actor.getPtr());
@@ -1675,7 +1694,10 @@ namespace MWMechanics
             }
 
             if (Settings::game().mNPCsAvoidCollisions)
+            {
+                OMW3DS_MECH_PHASE("mech.avoid");
                 predictAndAvoidCollisions(duration);
+            }
 
             mTimerUpdateHeadTrack += duration;
             mTimerUpdateEquippedLight += duration;
@@ -1737,7 +1759,10 @@ namespace MWMechanics
                     actor.setPositionAdjusted(true);
                 }
 
-                ctrl.update(duration);
+                {
+                    OMW3DS_MECH_PHASE("mech.anim");
+                    ctrl.update(duration);
+                }
 
                 updateVisibility(actor.getPtr(), ctrl);
             }
@@ -2060,6 +2085,12 @@ namespace MWMechanics
         }
         else
         {
+#ifdef OPENMW_PLATFORM_3DS
+            // Outside the hydration radius (n3ds/hydration.cpp) the object isn't in the scene, but its script
+            // still runs: Balmora's banners asked for their animation every frame, ~3000 log lines a minute.
+            if (ptr.getRefData().getBaseNode() == nullptr)
+                return false;
+#endif
             Log(Debug::Warning) << "Warning: Actors::playAnimationGroup: Unable to find "
                                 << ptr.getCellRef().getRefId();
             return false;

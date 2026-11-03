@@ -1,3 +1,6 @@
+#ifdef OPENMW_PLATFORM_3DS
+#include <components/render3ds/render3ds.hpp>
+#endif
 #include "loadingscreen.hpp"
 
 #include <array>
@@ -26,6 +29,11 @@
 #include "../mwbase/windowmanager.hpp"
 
 #include "backgroundimage.hpp"
+
+#ifdef OPENMW_PLATFORM_3DS
+#include "../n3ds/frame3ds.hpp"
+#include <platform3ds/crash.hpp>
+#endif
 
 namespace MWGui
 {
@@ -58,6 +66,11 @@ namespace MWGui
 
     void LoadingScreen::findSplashScreens()
     {
+#ifdef OPENMW_PLATFORM_3DS
+        // No splash wallpapers on 3DS: each full-size TGA decodes to ~3 MB and stays cached. One is
+        // shown every 5 s, which cost ~15 MB during data loading alone. The loading bar remains.
+        return;
+#endif
         auto isSupportedExtension = [](const std::string_view& ext) {
             static const std::array<std::string, 7> supportedExtensions{ { "tga", "dds", "ktx", "png", "bmp", "jpeg",
                 "jpg" } };
@@ -148,6 +161,9 @@ namespace MWGui
             return;
 
         mLoadingOnTime = mTimer.time_m();
+#ifdef OPENMW_PLATFORM_3DS
+        Render3DS::setHoldTopScreen(true);
+#endif
 
         // Assign dummy bounding sphere callback to avoid the bounding sphere of the entire scene being recomputed after
         // each frame of loading We are already using node masks to avoid the scene from being updated/rendered, but
@@ -176,6 +192,9 @@ namespace MWGui
     {
         if (--mNestedLoadingCount > 0)
             return;
+#ifdef OPENMW_PLATFORM_3DS
+        Render3DS::setHoldTopScreen(false);
+#endif
 
         if (mLastRenderTime < mLoadingOnTime)
         {
@@ -317,6 +336,10 @@ namespace MWGui
 
     void LoadingScreen::draw()
     {
+#ifdef OPENMW_PLATFORM_3DS
+        p3ds::crash::kick("loading screen"); // loading is progressing: feed the hang watchdog
+        omw3ds::onLoadingTick(); // HOME button, bottom screen
+#endif
         if (!needToDrawLoadingScreen())
             return;
 

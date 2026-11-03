@@ -1,0 +1,628 @@
+// Nintendo 3DS entry point (replaces main() in apps/openmw/main.cpp on this platform).
+//
+// Brings up the platform layer (log file, crash logger, hang watchdog, memory split, bottom-screen
+// debug display) before handing over to OpenMW's unchanged runApplication(). Command-line options come
+// from sdmc:/openmw/args.txt (one argument per line). The debug default boots straight into a new game
+// with the default generated character in Seyda Neen:
+//   --skip-menu --start "Seyda Neen"
+// (--new-game is deliberately absent: it would start character generation and the intro movie.)
+
+#include "frame3ds.hpp"
+#ifdef OPENMW_PLATFORM_3DS
+#include <openmw3ds_version.h>
+#include <unicode/udata.h>
+#include <unicode/utypes.h>
+
+#include "icudt73l_dat.h"
+#endif
+#include "sound3ds.hpp"
+
+#include <platform3ds/crash.hpp>
+#include <platform3ds/loadscreen.hpp>
+#include <platform3ds/log.hpp>
+#include <platform3ds/platform.hpp>
+
+#include <components/debug/debugging.hpp>
+#include <components/render3ds/render3ds.hpp>
+
+#include <3ds.h>
+
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <unistd.h>
+#include <vector>
+
+#include <platform3ds/menuart.hpp>
+#include <platform3ds/textfb.hpp>
+
+#include <algorithm>
+#include <cstdio>
+#include <sys/stat.h>
+
+#ifdef OPENMW3DS_DEBUG
+#include "benchmark3ds.hpp"
+
+#include <cctype>
+#include <set>
+#include <sstream>
+#endif
+
+int runApplication(int argc, char* argv[]); // apps/openmw/main.cpp
+
+namespace
+{
+    constexpr const char* kArgsPath = "sdmc:/" OPENMW3DS_SD_DIR "/args.txt";
+
+    // The start menu's choice (M15): Start boots the game's own main menu (a new game goes through character
+    // creation). Debug's "Start game", intro skipped, keeps the test set-up of args.txt (--skip-menu --start <cell>
+    // --script-run test-start.txt: the test character with its gold, skills, axe and spells). Not skipped, it is the
+    // game's own start with the debug tools on. Automated runs skip the intro.
+    bool gSkipIntro = true;
+    bool gBenchmark = false; // the start menu's third choice (benchmark3ds.hpp)
+#ifdef OPENMW3DS_DEBUG
+    omw3ds::benchmark::Set gBenchmarkSet = omw3ds::benchmark::Set::Morrowind;
+    int gBenchmarkFirst = 0; // an automated run's "benchmark@N": the stage to start at
+#endif
+
+    std::vector<std::string> loadArguments()
+    {
+        std::vector<std::string> args{ "openmw" };
+        std::ifstream file(kArgsPath);
+        const bool haveFile = bool(file); // not !file later: reading to the end sets failbit
+        if (haveFile)
+        {
+            std::string line;
+            while (std::getline(file, line))
+            {
+                while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+                    line.pop_back();
+                if (!line.empty() && line[0] != '#')
+                    args.push_back(line);
+            }
+            P3DS_LOGI("arguments from %s", kArgsPath);
+        }
+        if (gBenchmark)
+        {
+            // A new game of its own (no test script, no character creation), started in Seyda Neen: the benchmark
+            // takes it round from there. Nothing is saved. A fixed random seed: the same AI and weather rolls each
+            // run (frame times still differ, so NPCs can still drift apart a little).
+            args = { "openmw", "--skip-menu", "--start", "Seyda Neen", "--random-seed", "1" };
+#ifdef OPENMW3DS_DEBUG
+            P3DS_LOGI("benchmark: %s, then the game quits",
+                gBenchmarkSet == omw3ds::benchmark::Set::Endurance ? "about 30 minutes" : "about 5 minutes");
+#endif
+        }
+        else if (!gSkipIntro)
+        {
+            // The game's own start: no skipped menu, no start cell, no test script. A player's card has no args.txt
+            // at all (the setup app writes none): the main menu too, never the debug defaults below (they put the
+            // player in Seyda Neen without the intro or character creation, seen with the setup app's first card).
+            std::vector<std::string> kept;
+            for (size_t i = 0; i < args.size(); ++i)
+            {
+                const std::string& a = args[i];
+                if (a == "--skip-menu" || a == "--new-game")
+                    continue;
+                if ((a == "--start" || a == "--script-run") && i + 1 < args.size())
+                {
+                    ++i;
+                    continue;
+                }
+                kept.push_back(a);
+            }
+            args = std::move(kept);
+            P3DS_LOGI("start normally: the main menu");
+        }
+        else if (!haveFile)
+        {
+            args.insert(args.end(), { "--skip-menu", "--start", "Seyda Neen" });
+            P3DS_LOGI("no %s: using debug defaults", kArgsPath);
+        }
+        for (const std::string& a : args)
+            P3DS_LOGI("  arg: %s", a.c_str());
+        return args;
+    }
+
+    const char* gContext = "openmw: startup";
+
+    // ------------------------------------------------------------------ the start menu (M15)
+    //
+    // Shown before the platform is up (p3ds::init: the chosen start decides the debug mode and where the logs go),
+    // drawn on the bottom screen by the CPU, in every build. "Start" is the game, "Check for updates", "Quit" (no
+    // Options page since the screenshot button is always there, test #108). Debug builds also have "Debug", with the test set-ups (skip
+    // the intro, the benchmark, the hardware test's runs): not in a release (M20, the tester).
+    //
+    // Hardware tests: sdmc:/openmw/test-menu.txt lists the test's runs (the switch files each one needs), shown in
+    // Debug as "Test run: <label>" (A goes to the next run). Debug's starts create the chosen run's switch files and
+    // delete the others', a normal Start deletes them all:
+    //   title <text>
+    //   logs <prefix>
+    //   run <label> | <switch files, separated by spaces, or nothing>
+#ifdef OPENMW3DS_DEBUG
+    struct TestRun
+    {
+        std::string mLabel;
+        std::vector<std::string> mSwitches;
+    };
+
+    struct TestRuns
+    {
+        std::string mTitle;
+        std::string mLogPrefix;
+        std::vector<TestRun> mRuns;
+        size_t mSelected = 0;
+    };
+
+    std::string trim(const std::string& text)
+    {
+        const size_t first = text.find_first_not_of(" \t\r");
+        if (first == std::string::npos)
+            return {};
+        return text.substr(first, text.find_last_not_of(" \t\r") - first + 1);
+    }
+
+    TestRuns readTestRuns()
+    {
+        TestRuns runs;
+        std::ifstream file("sdmc:/" OPENMW3DS_SD_DIR "/test-menu.txt");
+        std::string line;
+        while (file && std::getline(file, line))
+        {
+            line = trim(line);
+            if (line.rfind("title ", 0) == 0)
+                runs.mTitle = trim(line.substr(6));
+            else if (line.rfind("logs ", 0) == 0)
+                runs.mLogPrefix = trim(line.substr(5));
+            else if (line.rfind("run ", 0) == 0)
+            {
+                TestRun run;
+                const std::string rest = line.substr(4);
+                const size_t bar1 = rest.find('|');
+                const size_t bar2 = bar1 == std::string::npos ? bar1 : rest.find('|', bar1 + 1);
+                run.mLabel = trim(rest.substr(0, bar1));
+                if (bar1 != std::string::npos)
+                {
+                    const size_t end = bar2 == std::string::npos ? rest.size() : bar2;
+                    std::istringstream names(rest.substr(bar1 + 1, end - bar1 - 1));
+                    std::string name;
+                    while (names >> name)
+                        run.mSwitches.push_back(name);
+                }
+                runs.mRuns.push_back(run);
+            }
+        }
+        return runs;
+    }
+
+    // The chosen run's switch files exist afterwards, every other known one doesn't (`run` null: none, a normal
+    // start). Past tests' switches are in the list too (hardware test #57: a switch left by test #56 stayed on).
+    void applySwitches(const TestRuns& runs, const TestRun* run)
+    {
+        std::set<std::string> all{ "no-m8ui", "cpu-skinning", "draw-census", "memwalk",
+            // The performance batches' off switches (test #99 run B's stayed on the card through #100-#102:
+            // later menus didn't name them).
+            "no-thinweather", "no-posecadence", "no-smallcull", "no-flameloops", "no-samestate" };
+        for (const TestRun& r : runs.mRuns)
+            all.insert(r.mSwitches.begin(), r.mSwitches.end());
+        for (const std::string& name : all)
+        {
+            const std::string path = "sdmc:/" OPENMW3DS_SD_DIR "/" + name;
+            struct stat st;
+            const bool exists = stat(path.c_str(), &st) == 0;
+            const bool want = run != nullptr && std::find(run->mSwitches.begin(), run->mSwitches.end(), name)
+                != run->mSwitches.end();
+            if (want && !exists)
+            {
+                if (std::FILE* f = std::fopen(path.c_str(), "w"))
+                    std::fclose(f);
+            }
+            else if (!want && exists)
+                std::remove(path.c_str());
+        }
+    }
+
+    // A debug run's log folder: logs/<date>-<time>[-<test>-<run>] (the run: its label up to ':', "A: ..." -> "A").
+    std::string debugLogFolder(const TestRuns& runs)
+    {
+        const std::time_t now = std::time(nullptr);
+        char stamp[32];
+        std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", std::localtime(&now));
+        std::string folder = stamp;
+        if (!runs.mRuns.empty() && !runs.mLogPrefix.empty())
+        {
+            std::string run;
+            const std::string& label = runs.mRuns[runs.mSelected].mLabel;
+            for (char c : label.substr(0, label.find(':')))
+                if (std::isalnum(static_cast<unsigned char>(c)) || c == '-')
+                    run += c;
+            folder += "-" + runs.mLogPrefix + (run.empty() ? "" : "-" + run);
+        }
+        return folder;
+    }
+
+#endif
+
+    namespace menu
+    {
+        namespace tf = p3ds::textfb;
+        namespace art = p3ds::menuart;
+
+        // The loading screen (platform3ds/loadscreen.cpp) keeps this layout.
+        constexpr int kTitleY = 14;
+        constexpr int kHeaderLineY = 46;
+        constexpr int kItemsY = 58;
+        constexpr int kItemHeight = 25;
+        constexpr int kItemX = art::kMargin + 12;
+        constexpr int kFooterLineY = tf::kHeight - 30;
+        constexpr int kMessageY = kFooterLineY - 22;
+        constexpr int kFooterY = tf::kHeight - 24;
+
+        struct Item
+        {
+            std::string mLabel;
+            bool mEnabled = true;
+        };
+
+        // One page: the title, the items (UP/DOWN and A, or a tap on one), a message line and the controls. Returns
+        // the item chosen, or -1 for B.
+        int page(const std::string& title, const std::vector<Item>& items, std::string& message, size_t& selected,
+            bool canGoBack)
+        {
+            bool redraw = true;
+            while (aptMainLoop())
+            {
+                if (redraw)
+                {
+                    // Flat, left-aligned, MysticCards (menuart.cpp).
+                    art::background();
+                    art::text(art::kMargin, kTitleY, "OpenMW 3DS", art::Font::Title, art::colour::title);
+                    if (!title.empty())
+                        art::rightAligned(kTitleY + 8, title.c_str(), art::Font::Small, art::colour::dim);
+                    art::separator(kHeaderLineY);
+                    for (size_t i = 0; i < items.size(); ++i)
+                    {
+                        const int y = kItemsY + int(i) * kItemHeight;
+                        if (i == selected)
+                            art::mark(y, art::lineHeight(art::Font::Text));
+                        art::text(kItemX, y, items[i].mLabel.c_str(), art::Font::Text,
+                            !items[i].mEnabled ? art::colour::disabled
+                                : i == selected ? art::colour::selected
+                                                : art::colour::text);
+                    }
+                    if (!message.empty())
+                        art::text(kItemX, kMessageY, message.c_str(), art::Font::Text, art::colour::title);
+                    art::separator(kFooterLineY);
+                    // The buttons as the in-game hints show them (the tester, test #99).
+                    int x = art::kMargin;
+                    x += art::button(x, kFooterY - 1, 'A', art::colour::dim) + 4;
+                    art::text(x, kFooterY, "Choose", art::Font::Small, art::colour::dim);
+                    if (canGoBack)
+                    {
+                        x += art::textWidth("Choose", art::Font::Small) + 14;
+                        x += art::button(x, kFooterY - 1, 'B', art::colour::dim) + 4;
+                        art::text(x, kFooterY, "Back", art::Font::Small, art::colour::dim);
+                    }
+                    art::rightAligned(kFooterY, OPENMW3DS_VERSION, art::Font::Small, art::colour::dim);
+                    tf::present();
+                    redraw = false;
+                }
+                gspWaitForVBlank();
+                hidScanInput();
+                const u32 down = hidKeysDown();
+                if (down & KEY_DOWN)
+                {
+                    selected = (selected + 1) % items.size();
+                    redraw = true;
+                }
+                if (down & KEY_UP)
+                {
+                    selected = (selected + items.size() - 1) % items.size();
+                    redraw = true;
+                }
+                if (down & KEY_A)
+                    return int(selected);
+                if ((down & KEY_B) && canGoBack)
+                    return -1;
+                if (down & KEY_TOUCH)
+                {
+                    touchPosition touch;
+                    hidTouchRead(&touch);
+                    for (size_t i = 0; i < items.size(); ++i)
+                    {
+                        const int y = kItemsY + int(i) * kItemHeight - 2;
+                        if (touch.py >= y && touch.py < y + kItemHeight)
+                        {
+                            selected = i;
+                            return int(i);
+                        }
+                    }
+                }
+            }
+            return -1;
+        }
+    }
+
+    enum class Start
+    {
+        Game, // the main menu, debug tools off
+#ifdef OPENMW3DS_DEBUG
+        DebugGame, // straight into the game with the test character (--skip-menu)
+        DebugIntro, // the game's own start (main menu, intro, character creation) with the debug tools on (M19)
+        Benchmark,
+#endif
+        Quit,
+    };
+
+#ifdef OPENMW3DS_DEBUG
+    Start startMenu(TestRuns& runs, std::string& chosenLine)
+#else
+    Start startMenu(std::string& chosenLine)
+#endif
+    {
+        std::vector<menu::Item> items{ { "Start" } };
+#ifdef OPENMW3DS_DEBUG
+        items.push_back({ "Debug" });
+#endif
+        items.push_back({ "Check for updates" });
+        items.push_back({ "Quit" });
+        std::string message;
+        size_t mainSelected = 0;
+        while (true)
+        {
+            const int choice = menu::page("", items, message, mainSelected, false);
+            message.clear();
+            const std::string chosen = choice < 0 ? std::string("Quit") : items[choice].mLabel;
+            if (chosen == "Start")
+            {
+                chosenLine = "start: the game (debug tools off)";
+                return Start::Game;
+            }
+            if (chosen == "Check for updates")
+            {
+                message = "No update information yet.";
+                continue;
+            }
+            if (chosen == "Quit")
+                return Start::Quit;
+#ifdef OPENMW3DS_DEBUG
+            // Debug.
+            size_t selected = 0;
+            std::string note;
+            while (true)
+            {
+                // One "Start game", then whether to skip the intro (the tester, test #107): skipping is the test
+                // set-up of args.txt (the test character), not skipping the game's own beginning with the debug tools
+                // on (test #104).
+                std::vector<menu::Item> items{ { "Start game" }, { "Benchmark" }, { "Endurance (30 min)" } };
+                // The test's runs to choose from: only when there is a choice (the tester, test #105).
+                if (runs.mRuns.size() > 1)
+                    items.push_back({ "Test run: " + runs.mRuns[runs.mSelected].mLabel });
+                items.push_back({ "Back" });
+                const int option = menu::page("Debug", items, note, selected, true);
+                note.clear();
+                if (option < 0 || option == int(items.size()) - 1)
+                    break;
+                if (items[option].mLabel.rfind("Test run", 0) == 0)
+                {
+                    runs.mSelected = (runs.mSelected + 1) % runs.mRuns.size();
+                    continue;
+                }
+                const std::string run = runs.mRuns.empty() ? std::string()
+                                                           : " (test run " + runs.mRuns[runs.mSelected].mLabel + ")";
+                if (option == 0)
+                {
+                    size_t answer = 0;
+                    std::string none;
+                    const int skip = menu::page("Skip the intro?", { { "Yes" }, { "No" } }, none, answer, true);
+                    if (skip < 0)
+                        continue;
+                    if (skip == 0)
+                    {
+                        chosenLine = "start: debug, skip the intro" + run;
+                        return Start::DebugGame;
+                    }
+                    chosenLine = "start: debug, with the intro" + run;
+                    return Start::DebugIntro;
+                }
+                // Benchmark: Morrowind's places (about 5 minutes), or the endurance run (32 places twice, about 30
+                // minutes, to catch running out of memory), then the game quits.
+                if (option == 2)
+                {
+                    gBenchmarkSet = omw3ds::benchmark::Set::Endurance;
+                    chosenLine = "start: benchmark, endurance" + run;
+                }
+                else
+                {
+                    gBenchmarkSet = omw3ds::benchmark::Set::Morrowind;
+                    chosenLine = "start: benchmark, Morrowind" + run;
+                }
+                return Start::Benchmark;
+            }
+#endif
+        }
+    }
+}
+
+int main(int, char**)
+{
+    gfxInitDefault();
+    // ICU's data (M19): without it every message with a number lost it ("Your Long Blade skill increased to").
+    UErrorCode icuStatus = U_ZERO_ERROR;
+    udata_setCommonData(icudt73l_dat, &icuStatus); // logged once the log is up
+    p3ds::InitOptions opts;
+    opts.ciaUniqueId = OPENMW3DS_UNIQUE_ID; // the packaging's UNIQUE_ID (CMakeLists.txt: the test title has its own)
+    // Before p3ds::init (the run decides where the logs go) and the watchdog (waiting here isn't a hang).
+    std::string startLine;
+#ifdef OPENMW3DS_DEBUG
+    std::string runLogs;
+    struct stat autorun;
+    if (stat(p3ds::kAutorunPath, &autorun) == 0)
+    {
+        // An automated (emulator) run: the test set-up, or the benchmark its autorun.txt asks for. The usual logs.
+        std::ifstream file(p3ds::kAutorunPath);
+        const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        gBenchmark = text.find("benchmark") != std::string::npos;
+        gBenchmarkSet = text.find("benchmark:tour") != std::string::npos ? omw3ds::benchmark::Set::Tour
+            : text.find("benchmark:endurance") != std::string::npos      ? omw3ds::benchmark::Set::Endurance
+                                                                          : omw3ds::benchmark::Set::Morrowind;
+        if (const size_t at = text.find("benchmark@"); at != std::string::npos)
+            gBenchmarkFirst = std::max(0, std::atoi(text.c_str() + at + 10) - 1);
+        startLine = gBenchmark ? "start: automated run, benchmark" : "start: automated run";
+    }
+    else
+#endif
+    {
+        p3ds::textfb::setupBottomScreen();
+        p3ds::menuart::topScreen();
+#ifdef OPENMW3DS_DEBUG
+        TestRuns runs = readTestRuns();
+#endif
+        // Each page is drawn whole into the hidden buffer, then shown (the tester, test #97: drawing into the shown
+        // one flashed the screen on every change). The loading screen draws on top of what is shown: single again.
+        gfxSetDoubleBuffering(GFX_BOTTOM, true);
+#ifdef OPENMW3DS_DEBUG
+        const Start start = startMenu(runs, startLine);
+#else
+        const Start start = startMenu(startLine);
+#endif
+        gfxSetDoubleBuffering(GFX_BOTTOM, false);
+        if (start == Start::Quit)
+        {
+            gfxExit();
+            return 0;
+        }
+#ifdef OPENMW3DS_DEBUG
+        gSkipIntro = start != Start::Game && start != Start::DebugIntro;
+        gBenchmark = start == Start::Benchmark;
+        opts.debugMode = start != Start::Game;
+        // A normal start runs without any test switch. A debug one with the chosen run's.
+        applySwitches(runs, opts.debugMode && !runs.mRuns.empty() ? &runs.mRuns[runs.mSelected] : nullptr);
+        // A debug run's logs get a folder of their own (creating one costs ~1.5 s on hardware: not for a normal
+        // start, whose logs stay in logs/, rotated).
+        if (opts.debugMode)
+            runLogs = debugLogFolder(runs);
+#else
+        // A release build (M20): Start is the game's own start (a test's args.txt left on the card doesn't skip
+        // it), the debug mode off.
+        gSkipIntro = false;
+        opts.debugMode = false;
+#endif
+    }
+#ifdef OPENMW3DS_DEBUG
+    if (gBenchmark)
+        omw3ds::benchmark::enable(gBenchmarkSet, gBenchmarkFirst);
+    if (!runLogs.empty())
+    {
+        opts.logSubdir = runLogs.c_str();
+        setenv("OPENMW3DS_LOG_DIR", ("/" OPENMW3DS_SD_DIR "/logs/" + runLogs).c_str(), 1); // OpenMW's openmw.log, MyGUI.log
+    }
+#endif
+    p3ds::init(opts);
+    P3DS_LOGI("ICU data (%lu KB): %s", (unsigned long)(icudt73l_dat_size / 1024), u_errorName(icuStatus));
+#ifdef OPENMW3DS_DEBUG
+    if (!startLine.empty())
+        P3DS_LOGI("%s, logs in logs/%s", startLine.c_str(), runLogs.c_str());
+#else
+    P3DS_LOGI("%s", startLine.c_str());
+#endif
+    p3ds::crash::setContextString(&gContext);
+    // Fed by Engine::frame() and LoadingScreen::draw() (see p3ds::crash::kick calls in openmw).
+    p3ds::crash::startWatchdog(60, p3ds::info().syscoreLimit > 0 ? 1 : 0);
+
+    // The bottom screen while the game starts (M15): the game's name, what it does, a moving row of blocks
+    // (platform3ds/loadscreen.cpp, drawn by the watchdog's thread). The M6 text screens (sdmc:/openmw/no-m8ui) keep
+    // the debug display instead.
+    if (access("sdmc:/" OPENMW3DS_SD_DIR "/no-m8ui", F_OK) == 0)
+    {
+        omw3ds::initBottomScreen("(starting OpenMW)");
+    }
+    else
+    {
+        char build[64] = OPENMW3DS_VERSION;
+        if (std::strlen(p3ds_build_id) >= 13)
+            std::snprintf(build, sizeof(build), "%s - build %.2s/%.2s %.2s:%.2s", OPENMW3DS_VERSION,
+                p3ds_build_id + 6, p3ds_build_id + 4, p3ds_build_id + 9, p3ds_build_id + 11);
+        p3ds::loadscreen::start(build);
+    }
+
+    // Top screen: citro3d draws what OSG culls (components/render3ds). Textures come from the pack cooked
+    // on the PC by tools/cook_textures.py.
+    if (!Render3DS::init())
+        P3DS_LOGE("citro3d renderer failed to start: running headless");
+    // M8's UI (MyGUI drawn on both screens). sdmc:/openmw/no-m8ui, the emergency fallback, goes back to M6's text
+    // screens (the bottom screen's debug display and menus).
+    Render3DS::setDrawsGui(access("sdmc:/" OPENMW3DS_SD_DIR "/no-m8ui", F_OK) != 0);
+    {
+        const char* pack = "sdmc:/" OPENMW3DS_SD_DIR "/cooked/textures.o3tp";
+#ifdef OPENMW3DS_DEBUG
+        // A test install (openmw-test) reads the player's textures when it brings none (scripts/stage-sd.ps1), as
+        // it reads their game files (its openmw.cfg's first data folder).
+        if (access(pack, F_OK) != 0)
+            pack = "sdmc:/openmw/cooked/textures.o3tp";
+#endif
+        Render3DS::openTexturePack(pack);
+    }
+
+    // Make the SD card the default device so plain "/openmw/..." paths work: std::filesystem (newlib)
+    // does not consider "sdmc:/..." absolute, and OpenMW resolves relative paths against config dirs.
+    chdir("sdmc:/");
+    // The folders the game writes to, created when missing: an upload over FTP leaves out empty folders (test #114:
+    // a new test install had no cache folder and stopped at startup). Each mkdir costs ~1.5 s on the card, so only
+    // when it isn't there.
+    for (const char* folder : { "cache", "saves", "screenshots", "config" })
+    {
+        const std::string path = std::string("/" OPENMW3DS_SD_DIR "/") + folder;
+        struct stat st;
+        if (stat(path.c_str(), &st) != 0)
+            mkdir(path.c_str(), 0777);
+    }
+    // std::filesystem::temp_directory_path() (used by the crash-catcher setup) needs an existing dir.
+    setenv("TMPDIR", "/" OPENMW3DS_SD_DIR "/cache", 1);
+    setenv("HOME", "/" OPENMW3DS_SD_DIR, 1);
+    // SDL is only used for events, joystick, touch and timers. Its n3ds video driver would take over
+    // the screens (gfxInit) and has no OpenGL, so use the dummy driver.
+    setenv("SDL_VIDEODRIVER", "dummy", 1);
+    // OSG's incremental compile pass would "upload" every new texture and geometry to the stub GL: CPU work
+    // for nothing (the citro3d backend uploads on first draw).
+    setenv("OPENMW_DONT_PRECOMPILE", "1", 1);
+    // Physics steps at 60 Hz by default: two steps per frame at the 30 fps cap, 17-26 ms of each 33 ms frame on
+    // core 2 in Seyda Neen (hardware test #21), where the work queue thread loading models also runs. One step
+    // per frame halves it. Actor movement uses swept shapes, so the longer step doesn't let actors tunnel.
+    setenv("OPENMW_PHYSICS_FPS", "30", 1);
+
+    std::vector<std::string> args = loadArguments();
+    std::vector<char*> argv;
+    for (std::string& a : args)
+        argv.push_back(a.data());
+    argv.push_back(nullptr);
+
+    gContext = "openmw: runApplication";
+    // Normally doesn't return: Engine::go() ends with omw3ds::exitProcess.
+    const int ret = Debug::wrapApplication(&runApplication, int(args.size()), argv.data(), "OpenMW");
+    omw3ds::exitProcess(ret);
+}
+
+void omw3ds::exitProcess(int code)
+{
+    std::cout.flush(); // OpenMW's log (openmw.log): its streams are never closed on this path
+    std::cerr.flush();
+    P3DS_LOGI("OpenMW exited with %d", code);
+    if (p3ds::info().autorun)
+        p3ds::writeSmallFile(p3ds::kAutorunDonePath, "done\n"); // emulator test runs wait for it
+    // Each step is named for the watchdog: a hang here gets a crash report that says where.
+    p3ds::crash::kick("shutdown: sound");
+    MWSound::shutdownSound3DS();
+    p3ds::crash::kick("shutdown: bottom screen");
+    omw3ds::shutdownBottomScreen();
+    p3ds::crash::kick("shutdown: render3ds");
+    Render3DS::shutdown();
+    p3ds::crash::kick("shutdown: platform");
+    p3ds::shutdown();
+    gfxExit();
+    // No static destructors (OpenMW's objects still exist). libctru still closes its services.
+    _exit(code);
+}

@@ -21,10 +21,13 @@
 #include <components/misc/convert.hpp>
 #include <components/misc/resourcehelpers.hpp>
 #include <components/resource/resourcesystem.hpp>
+#include <components/resource/keyframemanager.hpp>
 #include <components/resource/scenemanager.hpp>
 #include <components/sceneutil/positionattitudetransform.hpp>
 #include <components/settings/values.hpp>
 #include <components/terrain/terraingrid.hpp>
+#include <components/terrain/view.hpp>
+#include <components/vfs/manager.hpp>
 #include <components/vfs/pathutil.hpp>
 
 #include "../mwbase/environment.hpp"
@@ -54,6 +57,25 @@
 #include "localscripts.hpp"
 #include "player.hpp"
 #include "worldimp.hpp"
+
+#ifdef OPENMW_PLATFORM_3DS
+#include "../n3ds/hydration.hpp"
+#include "../n3ds/memrelief.hpp"
+#include "worldmodel.hpp"
+#include <3ds.h>
+#include <cstdio>
+#include <components/resource/bulletshapemanager.hpp>
+#include <platform3ds/memprobe.hpp>
+// Diagnostic: attributes main-thread heap growth while loading a cell to the object's record type
+// (rendering) and to subsystems ("+PHY" physics, "+MEC" mechanics, "+LUA" Lua).
+#define OMW3DS_MEMSCOPE(key) p3ds::memprobe::Scope omw3dsMemScope(key)
+#define OMW3DS_MEMSTAGE(label) p3ds::memprobe::stage(label)
+#define OMW3DS_MEMREPORT(label) p3ds::memprobe::report(label)
+#else
+#define OMW3DS_MEMSCOPE(key)
+#define OMW3DS_MEMSTAGE(label)
+#define OMW3DS_MEMREPORT(label)
+#endif
 
 namespace
 {
@@ -110,9 +132,57 @@ namespace
     // TODO: find a more clever way to make paging exclusion more reliable?
     static osg::ref_ptr<SceneUtil::PositionAttitudeTransform> pagedNode = new SceneUtil::PositionAttitudeTransform;
 
+#ifdef OPENMW_PLATFORM_3DS
+    // Times the steps of putting one object in the scene and logs them when it took long (hydration stalls).
+    class InsertTimer
+    {
+    public:
+        explicit InsertTimer(const MWWorld::Ptr& ptr)
+            : mPtr(ptr)
+            , mStart(svcGetSystemTick())
+            , mLast(mStart)
+        {
+            p3ds::perf::detail::begin();
+        }
+
+        void step(const char* name)
+        {
+            const uint64_t now = svcGetSystemTick();
+            if (mLength < sizeof(mText))
+                mLength += std::snprintf(mText + mLength, sizeof(mText) - mLength, " %s %.0f", name, toMs(now - mLast));
+            mLast = now;
+        }
+
+        ~InsertTimer()
+        {
+            // The detail line breaks the steps down (ms/calls, nested scopes included in their parents).
+            char detail[300];
+            p3ds::perf::detail::end(detail, sizeof(detail));
+            if (toMs(mLast - mStart) > 50.0)
+                Log(Debug::Info) << "3ds insert " << mPtr.getCellRef().getRefId() << " (ms):" << mText
+                                 << " | detail:" << detail;
+        }
+
+    private:
+        static double toMs(uint64_t ticks) { return double(ticks) * 1000.0 / SYSCLOCK_ARM11; }
+
+        const MWWorld::Ptr& mPtr;
+        uint64_t mStart;
+        uint64_t mLast;
+        char mText[160] = {};
+        size_t mLength = 0;
+    };
+#define OMW3DS_INSERT_STEP(name) insertTimer.step(name)
+#else
+#define OMW3DS_INSERT_STEP(name)
+#endif
+
     void addObject(const MWWorld::Ptr& ptr, const MWWorld::World& world, const std::vector<ESM::RefNum>& pagedRefs,
         MWPhysics::PhysicsSystem& physics, MWRender::RenderingManager& rendering)
     {
+#ifdef OPENMW_PLATFORM_3DS
+        InsertTimer insertTimer(ptr);
+#endif
         if (ptr.getRefData().getBaseNode() || physics.getActor(ptr))
         {
             Log(Debug::Warning) << "Warning: Tried to add " << ptr.getCellRef().getRefId() << " to the scene twice";
@@ -123,25 +193,40 @@ namespace
         const auto rotation = makeDirectNodeRotation(ptr);
 
         ESM::RefNum refnum = ptr.getCellRef().getRefNum();
-        if (!refnum.hasContentFile() || !std::binary_search(pagedRefs.begin(), pagedRefs.end(), refnum))
-            ptr.getClass().insertObjectRendering(ptr, model, rendering);
-        else
-            ptr.getRefData().setBaseNode(pagedNode);
-        setNodeRotation(ptr, rendering, rotation);
+        {
+            OMW3DS_MEMSCOPE(ptr.getType());
+            if (!refnum.hasContentFile() || !std::binary_search(pagedRefs.begin(), pagedRefs.end(), refnum))
+                ptr.getClass().insertObjectRendering(ptr, model, rendering);
+            else
+                ptr.getRefData().setBaseNode(pagedNode);
+            setNodeRotation(ptr, rendering, rotation);
+        }
+        OMW3DS_INSERT_STEP("render");
 
         if (ptr.getClass().useAnim())
+        {
+            OMW3DS_MEMSCOPE(0x43454D2B); // "+MEC"
             MWBase::Environment::get().getMechanicsManager()->add(ptr);
+        }
+        OMW3DS_INSERT_STEP("mechanics");
 
         if (ptr.getClass().isActor())
             rendering.addWaterRippleEmitter(ptr);
 
         // Restore effect particles
         world.applyLoopingParticles(ptr);
+        OMW3DS_INSERT_STEP("effects");
 
         if (!model.empty())
+        {
+            OMW3DS_MEMSCOPE(0x5948502B); // "+PHY"
             ptr.getClass().insertObject(ptr, model, rotation, physics);
+        }
+        OMW3DS_INSERT_STEP("physics");
 
+        OMW3DS_MEMSCOPE(0x41554C2B); // "+LUA"
         MWBase::Environment::get().getLuaManager()->objectAddedToScene(ptr);
+        OMW3DS_INSERT_STEP("lua");
     }
 
     void addObject(const MWWorld::Ptr& ptr, const MWWorld::World& world, const MWPhysics::PhysicsSystem& physics,
@@ -261,7 +346,10 @@ namespace
             }
 
             if (mLoadingListener != nullptr)
+            {
+                OMW3DS_MEMSCOPE(0x53444C2B); // "+LDS" loading screen
                 mLoadingListener->increaseProgress(1);
+            }
         }
     }
 
@@ -361,6 +449,9 @@ namespace MWWorld
 
         mPreloader->updateCache(mRendering.getReferenceTime());
         preloadCells(duration);
+#ifdef OPENMW_PLATFORM_3DS
+        omw3ds::hydration::update(*this);
+#endif
     }
 
     void Scene::unloadCell(CellStore* cell, const DetourNavigator::UpdateGuard* navigatorUpdateGuard)
@@ -368,6 +459,9 @@ namespace MWWorld
         if (mActiveCells.find(cell) == mActiveCells.end())
             return;
         Log(Debug::Info) << "Unloading cell " << cell->getCell()->getDescription();
+#ifdef OPENMW_PLATFORM_3DS
+        mWorld.getWorldModel().touchCell(*cell); // left now: the eviction order counts from here
+#endif
 
         ListAndResetObjectsVisitor visitor;
 
@@ -493,16 +587,35 @@ namespace MWWorld
 
         // register local scripts
         // do this before insertCell, to make sure we don't add scripts from levelled creature spawning twice
+        OMW3DS_MEMSTAGE("loadCell: start");
+#ifdef OPENMW_PLATFORM_3DS
+        mWorld.getWorldModel().touchCell(cell); // cell eviction's least recently used order
+#endif
         mWorld.getLocalScripts().addCell(&cell);
 
         if (respawn)
             cell.respawn();
+        OMW3DS_MEMSTAGE("loadCell: local scripts");
 
+#ifdef OPENMW_PLATFORM_3DS
+        p3ds::memprobe::callerProfileStart(); // main thread
+        omw3ds::hydration::setLoadCenter(position);
+#endif
         insertCell(cell, loadingListener, navigatorUpdateGuard);
+        OMW3DS_MEMSTAGE("loadCell: insertCell");
+#ifdef OPENMW_PLATFORM_3DS
+        Log(Debug::Info) << "3ds collision: lowest point " << mLowestPoint;
+#endif
+#ifdef OPENMW_PLATFORM_3DS
+        p3ds::memprobe::callerProfileStop("insertCell, main thread");
+#endif
+        OMW3DS_MEMREPORT("insertCell by record type");
 
         mRendering.addCell(&cell);
+        OMW3DS_MEMSTAGE("loadCell: rendering addCell");
 
         MWBase::Environment::get().getWindowManager()->addCell(&cell);
+        OMW3DS_MEMSTAGE("loadCell: windowmanager addCell");
         bool waterEnabled = cellVariant.hasWater() || cell.isExterior();
         float waterLevel = cell.getWaterLevel();
         mRendering.setWaterEnabled(waterEnabled);
@@ -636,6 +749,11 @@ namespace MWWorld
             else
                 unloadCell(cell, navigatorUpdateGuard.get());
         }
+#ifdef OPENMW_PLATFORM_3DS
+        OMW3DS_MEMSTAGE("cell change: old cells unloaded");
+        omw3ds::memrelief::onCellChange(*mRendering.getResourceSystem());
+        OMW3DS_MEMSTAGE("cell change: memory watchdog");
+#endif
 
         const DetourNavigator::CellGridBounds cellGridBounds{
             .mCenter = osg::Vec2i(playerCellX, playerCellY),
@@ -693,8 +811,10 @@ namespace MWWorld
 
         navigatorUpdateGuard.reset();
 
+        OMW3DS_MEMSTAGE("cell change: navigator");
         CellStore& current = mWorld.getWorldModel().getExterior(playerCellIndex);
         MWBase::Environment::get().getWindowManager()->changeCell(&current);
+        OMW3DS_MEMSTAGE("cell change: exterior done");
 
         if (changeEvent)
             mCellChanged = true;
@@ -964,6 +1084,11 @@ namespace MWWorld
             unloadCell(cellToUnload, navigatorUpdateGuard.get());
         }
         assert(mActiveCells.empty());
+#ifdef OPENMW_PLATFORM_3DS
+        OMW3DS_MEMSTAGE("cell change: old cells unloaded");
+        omw3ds::memrelief::onCellChange(*mRendering.getResourceSystem());
+        OMW3DS_MEMSTAGE("cell change: memory watchdog");
+#endif
 
         loadingListener->setProgressRange(cell.count());
 
@@ -993,6 +1118,7 @@ namespace MWWorld
             MWBase::Environment::get().getWindowManager()->fadeScreenIn(0.5);
 
         MWBase::Environment::get().getWindowManager()->changeCell(mCurrentCell);
+        OMW3DS_MEMSTAGE("cell change: interior done");
 
         MWBase::Environment::get().getWorld()->getPostProcessor()->setExteriorFlag(cell.getCell()->isQuasiExterior());
     }
@@ -1034,9 +1160,14 @@ namespace MWWorld
         const bool isInterior = !cell.isExterior();
         InsertVisitor insertVisitor(cell, loadingListener);
         cell.forEach(insertVisitor);
+#ifdef OPENMW_PLATFORM_3DS
+        if (!isInterior)
+            omw3ds::hydration::filterInsert(insertVisitor.mToInsert);
+#endif
         insertVisitor.insert(
             [&](const MWWorld::Ptr& ptr) { addObject(ptr, mWorld, mPagedRefs, *mPhysics, mRendering); });
         insertVisitor.insert([&](const MWWorld::Ptr& ptr) {
+            OMW3DS_MEMSCOPE(0x56414E2B); // "+NAV"
             addObject(ptr, mWorld, *mPhysics, mLowestPoint, isInterior, mNavigator, navigatorUpdateGuard);
         });
     }
@@ -1102,7 +1233,29 @@ namespace MWWorld
 
             try
             {
+#ifdef OPENMW_PLATFORM_3DS
+                // Held while the item is (hydration keeps it until the object is inserted): the resource cache drops
+                // what nothing references after 5 s, and an object can wait longer than that in the preload ring.
+                mTemplate = mSceneManager->getTemplate(mMesh);
+                // The collision shape too (as CellPreloader does): inserting the object later would otherwise read
+                // and parse the file again on the main thread.
+                if (mShapeManager != nullptr)
+                    mShape = mShapeManager->getShape(mMesh);
+                // M10: an actor model's animations (model.kf beside model.nif, as Animation::addAnimSource names
+                // them): read on the main thread at insertion otherwise (test #83: an NPC's 613 ms, a large .kf).
+                if (mKeyframeManager != nullptr && mVfs != nullptr)
+                {
+                    VFS::Path::Normalized kf(mMesh);
+                    if (kf.extension() == VFS::Path::ExtensionView("nif"))
+                    {
+                        kf.changeExtension(VFS::Path::ExtensionView("kf"));
+                        if (mVfs->exists(kf))
+                            mKeyframes = mKeyframeManager->get(kf);
+                    }
+                }
+#else
                 mSceneManager->getTemplate(mMesh);
+#endif
             }
             catch (const std::exception& e)
             {
@@ -1112,12 +1265,53 @@ namespace MWWorld
 
         void abort() override { mAborted = true; }
 
+#ifdef OPENMW_PLATFORM_3DS
+        void setShapeManager(Resource::BulletShapeManager* shapeManager) { mShapeManager = shapeManager; }
+        void setKeyframeManager(Resource::KeyframeManager* keyframeManager, const VFS::Manager* vfs)
+        {
+            mKeyframeManager = keyframeManager;
+            mVfs = vfs;
+        }
+#endif
+
     private:
         VFS::Path::Normalized mMesh;
         Resource::SceneManager* mSceneManager;
+#ifdef OPENMW_PLATFORM_3DS
+        Resource::BulletShapeManager* mShapeManager = nullptr;
+        osg::ref_ptr<const osg::Node> mTemplate;
+        std::shared_ptr<const Resource::BulletShape> mShape;
+        Resource::KeyframeManager* mKeyframeManager = nullptr;
+        const VFS::Manager* mVfs = nullptr;
+        std::shared_ptr<const SceneUtil::KeyframeHolder> mKeyframes;
+#endif
         std::atomic_bool mAborted{ false };
     };
 
+#ifdef OPENMW_PLATFORM_3DS
+    std::shared_ptr<SceneUtil::WorkItem> Scene::preload(const std::string& mesh, bool useAnim, bool withShape)
+    {
+        const VFS::Path::Normalized meshPath = useAnim
+            ? Misc::ResourceHelpers::correctActorModelPath(
+                VFS::Path::toNormalized(mesh), mRendering.getResourceSystem()->getVFS())
+            : VFS::Path::toNormalized(mesh);
+
+        // Queued even when the model is loaded: the item holds it (and the collision shape, which can be missing
+        // anyway: physics keeps only an actor's extents, so its shape expires 5 s after each insertion) until the
+        // caller lets go of the item. A cache hit on the work queue thread costs little.
+        auto item = std::make_shared<PreloadMeshItem>(meshPath, mRendering.getResourceSystem()->getSceneManager());
+        if (withShape)
+            item->setShapeManager(mPhysics->getShapeManager());
+        if (useAnim)
+            item->setKeyframeManager(
+                mRendering.getResourceSystem()->getKeyframeManager(), mRendering.getResourceSystem()->getVFS());
+        mRendering.getWorkQueue()->addWorkItem(item);
+        const auto isDone = [](const std::shared_ptr<SceneUtil::WorkItem>& v) { return v->isDone(); };
+        mWorkItems.erase(std::remove_if(mWorkItems.begin(), mWorkItems.end(), isDone), mWorkItems.end());
+        mWorkItems.emplace_back(item);
+        return item;
+    }
+#else
     void Scene::preload(const std::string& mesh, bool useAnim)
     {
         const VFS::Path::Normalized meshPath = useAnim
@@ -1134,6 +1328,7 @@ namespace MWWorld
         mWorkItems.erase(std::remove_if(mWorkItems.begin(), mWorkItems.end(), isDone), mWorkItems.end());
         mWorkItems.emplace_back(std::move(item));
     }
+#endif
 
     void Scene::preloadCells(float dt)
     {
@@ -1156,6 +1351,9 @@ namespace MWWorld
 
         mLastPlayerPos = playerPos;
 
+#ifdef OPENMW_PLATFORM_3DS
+        preloadEdgeTerrain3DS(playerPos, predictedPos);
+#endif
         if (mPreloadEnabled)
         {
             if (mPreloadDoors)
@@ -1200,6 +1398,115 @@ namespace MWWorld
             }
         }
     }
+
+#ifdef OPENMW_PLATFORM_3DS
+    namespace
+    {
+        // One cell's terrain (its chunks, the land data they're made from), held by the item until it's released.
+        class PreloadTerrainItem : public SceneUtil::WorkItem
+        {
+        public:
+            PreloadTerrainItem(Terrain::World& terrain, MWRender::LandManager& land, ESM::ExteriorCellLocation cell)
+                : mTerrain(terrain)
+                , mLand(land)
+                , mCell(cell)
+                , mView(terrain.createView()) // on the main thread, as CellPreloader's PreloadItem
+            {
+            }
+
+            void doWork() override
+            {
+                if (mAborted)
+                    return;
+                try
+                {
+                    mLandObject = mLand.getLand(mCell);
+                    if (mView != nullptr && !mAborted)
+                        mTerrain.cacheCell(mView.get(), mCell.mX, mCell.mY);
+                }
+                catch (const std::exception& e)
+                {
+                    Log(Debug::Warning) << "Failed to preload the terrain of " << mCell << ": " << e.what();
+                }
+            }
+
+            void abort() override { mAborted = true; }
+
+        private:
+            Terrain::World& mTerrain;
+            MWRender::LandManager& mLand;
+            ESM::ExteriorCellLocation mCell;
+            std::unique_ptr<Terrain::View> mView;
+            std::shared_ptr<const ESMTerrain::LandObject> mLandObject;
+            std::atomic_bool mAborted{ false };
+        };
+    }
+
+    void Scene::preloadEdgeTerrain3DS(const osg::Vec3f& playerPos, const osg::Vec3f& predictedPos)
+    {
+        Terrain::World* terrain = mRendering.getTerrain();
+        if (mCurrentCell == nullptr || !mCurrentCell->isExterior() || terrain == nullptr)
+        {
+            for (auto& [cell, item] : mEdgeTerrain3DS)
+                item->abort();
+            mEdgeTerrain3DS.clear();
+            return;
+        }
+        static unsigned frames = 0;
+        if (++frames % 10 != 0)
+            return;
+        // The cells of the ring just outside the loaded grid that the player (now, or as predicted) is within
+        // kAhead of loading: crossing then finds their chunks in the terrain's cache instead of building them
+        // (test #83: 80-126 ms a cell, three a crossing, behind a loading screen). Walking speed gives the work
+        // queue a few seconds. At most kMaxCells (a corner wants five).
+        constexpr float kAhead = 1536.f;
+        constexpr std::size_t kMaxCells = 5;
+        const ESM::RefId worldspace = mWorld.getCurrentWorldspace();
+        const int cellSize = ESM::getCellSize(worldspace);
+        const int ring = mHalfGridSize + 1;
+        const float loadDist = cellSize / 2 + cellSize - mCellLoadingThreshold + kAhead;
+        std::vector<std::pair<float, std::pair<int, int>>> wanted;
+        for (int dx = -ring; dx <= ring; ++dx)
+            for (int dy = -ring; dy <= ring; ++dy)
+            {
+                if (dx != ring && dx != -ring && dy != ring && dy != -ring)
+                    continue;
+                const ESM::ExteriorCellLocation cell(
+                    mCurrentGridCenter.x() + dx, mCurrentGridCenter.y() + dy, worldspace);
+                const osg::Vec2f center = ESM::indexToPosition(cell, true);
+                const float dist = std::min(
+                    std::max(std::abs(center.x() - playerPos.x()), std::abs(center.y() - playerPos.y())),
+                    std::max(std::abs(center.x() - predictedPos.x()), std::abs(center.y() - predictedPos.y())));
+                if (dist < loadDist)
+                    wanted.emplace_back(dist, std::make_pair(cell.mX, cell.mY));
+            }
+        std::sort(wanted.begin(), wanted.end());
+        if (wanted.size() > kMaxCells)
+            wanted.resize(kMaxCells);
+        // Released once out of the ring: a cell the grid now holds keeps its chunks through the loaded terrain.
+        for (auto it = mEdgeTerrain3DS.begin(); it != mEdgeTerrain3DS.end();)
+        {
+            const bool keep = std::any_of(
+                wanted.begin(), wanted.end(), [&](const auto& w) { return w.second == it->first; });
+            if (keep)
+                ++it;
+            else
+            {
+                it->second->abort();
+                it = mEdgeTerrain3DS.erase(it);
+            }
+        }
+        for (const auto& [dist, xy] : wanted)
+        {
+            if (mEdgeTerrain3DS.count(xy) != 0)
+                continue;
+            auto item = std::make_shared<PreloadTerrainItem>(
+                *terrain, *mRendering.getLandManager(), ESM::ExteriorCellLocation(xy.first, xy.second, worldspace));
+            mRendering.getWorkQueue()->addWorkItem(item);
+            mEdgeTerrain3DS.emplace(xy, std::move(item));
+        }
+    }
+#endif
 
     void Scene::preloadExteriorGrid(const osg::Vec3f& playerPos, const osg::Vec3f& predictedPos)
     {

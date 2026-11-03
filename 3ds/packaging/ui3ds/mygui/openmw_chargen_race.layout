@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- The race window on the two 3DS screens (M8 phase 2, the tester's split): the appearance and the skill
+     bonuses on the top screen, the race list, the specials, the head/sex/face/hair controls and the buttons on
+     the bottom one. The root spans the canvas (400x480: the top screen above, the bottom screen's 320x240 at
+     40,240) without a frame; each screen gets its own dialog panel. The widget names are race.cpp's. -->
+<MyGUI type="Layout">
+    <Widget type="Window" skin="" layer="Modal" position="0 0 400 480" name="_Main">
+        <!-- M17: the bottom panel has no room for the button hints: they go under the top screen's panel. -->
+        <UserString key="Hints3DS" value="top"/>
+
+        <!-- Top screen -->
+        <Widget type="Widget" skin="MW_Dialog" position="0 0 400 240">
+            <Widget type="TextBox" skin="HeaderText" position="8 6 180 18" name="AppearanceT" align="Left Top">
+                <Property key="Caption" value="Appearance"/>
+                <Property key="TextAlign" value="Left Top"/>
+            </Widget>
+            <Widget type="Widget" skin="MW_Box" position="8 26 180 204">
+                <Widget type="ImageBox" skin="ImageBox" position="2 2 176 200" align="Stretch" name="PreviewImage"/>
+            </Widget>
+
+            <Widget type="TextBox" skin="HeaderText" position="200 6 192 18" name="SkillsT" align="Left Top">
+                <Property key="TextAlign" value="Left Top"/>
+            </Widget>
+            <!-- Skill bonus sub-widgets will be placed here, no skin to make it invisible -->
+            <Widget type="Widget" skin="" position="200 26 184 204" name="SkillList"/> <!-- M19: 184 wide, the numbers off the frame -->
+        </Widget>
+
+        <!-- Bottom screen -->
+        <Widget type="Widget" skin="MW_Dialog" position="40 240 320 240">
+            <Widget type="TextBox" skin="HeaderText" position="8 4 140 18" name="RaceT" align="Left Top">
+                <Property key="TextAlign" value="Left Top"/>
+            </Widget>
+            <Widget type="ListBox" skin="MW_List" position="8 24 140 112" name="RaceList">
+            </Widget>
+
+            <Widget type="TextBox" skin="HeaderText" position="154 4 160 18" name="SpellPowerT" align="Left Top">
+                <Property key="TextAlign" value="Left Top"/>
+            </Widget>
+            <!-- Spell power sub-widgets will be placed here, no skin to make it invisible -->
+            <Widget type="Widget" skin="" position="154 24 160 112" name="SpellPowerList"/> <!-- M19: 160 wide, "Weakness to Magicka" whole -->
+
+            <!-- Rotation of head -->
+            <Widget type="ScrollBar" skin="MW_HScroll" position="8 142 140 14" name="HeadRotate"/>
+
+            <!-- Gender choice -->
+            <Widget type="Widget" skin="MW_Box" position="8 164 15 14">
+                <Widget type="Button" skin="MW_ArrowLeft" position="2 2 10 10" align="Left VStretch" name="PrevGenderButton"/>
+            </Widget>
+            <Widget type="TextBox" skin="HeaderText" position="25 160 106 18" name="GenderChoiceT"/>
+            <Widget type="Widget" skin="MW_Box" position="133 164 15 14">
+                <Widget type="Button" skin="MW_ArrowRight" position="2 2 10 10" align="Right VStretch" name="NextGenderButton"/>
+            </Widget>
+            <!-- Bigger touch areas for the arrows (the tester, 20/10: the 10x10 arrows are hard to hit), invisible -->
+            <Widget type="Button" skin="" position="2 160 26 22" name="PrevGenderHit3DS"/>
+            <Widget type="Button" skin="" position="128 160 26 22" name="NextGenderHit3DS"/>
+
+            <!-- Face choice -->
+            <Widget type="Widget" skin="MW_Box" position="8 186 15 14">
+                <Widget type="Button" skin="MW_ArrowLeft" position="2 2 10 10" align="Left VStretch" name="PrevFaceButton"/>
+            </Widget>
+            <Widget type="TextBox" skin="HeaderText" position="25 182 106 18" name="FaceChoiceT"/>
+            <Widget type="Widget" skin="MW_Box" position="133 186 15 14">
+                <Widget type="Button" skin="MW_ArrowRight" position="2 2 10 10" align="Right VStretch" name="NextFaceButton"/>
+            </Widget>
+            <!-- Bigger touch areas for the arrows (the tester, 20/10: the 10x10 arrows are hard to hit), invisible -->
+            <Widget type="Button" skin="" position="2 182 26 22" name="PrevFaceHit3DS"/>
+            <Widget type="Button" skin="" position="128 182 26 22" name="NextFaceHit3DS"/>
+
+            <!-- Hair choice -->
+            <Widget type="Widget" skin="MW_Box" position="8 208 15 14">
+                <Widget type="Button" skin="MW_ArrowLeft" position="2 2 10 10" align="Left VStretch" name="PrevHairButton"/>
+            </Widget>
+            <Widget type="TextBox" skin="HeaderText" position="25 204 106 18" name="HairChoiceT"/>
+            <Widget type="Widget" skin="MW_Box" position="133 208 15 14">
+                <Widget type="Button" skin="MW_ArrowRight" position="2 2 10 10" align="Right VStretch" name="NextHairButton"/>
+            </Widget>
+            <!-- Bigger touch areas for the arrows (the tester, 20/10: the 10x10 arrows are hard to hit), invisible -->
+            <Widget type="Button" skin="" position="2 204 26 22" name="PrevHairHit3DS"/>
+            <Widget type="Button" skin="" position="128 204 26 22" name="NextHairHit3DS"/>
+
+            <!-- Dialog buttons -->
+            <Widget type="HBox" position="160 204 152 28">
+                <Widget type="Spacer"/>
+                <Widget type="AutoSizedButton" skin="MW_Button" position="0 0 53 23" name="BackButton">
+                    <Property key="Caption" value="#{sBack}"/>
+                </Widget>
+                <Widget type="AutoSizedButton" skin="MW_Button" position="60 0 42 23" name="OKButton">
+                    <Property key="Caption" value="#{Interface:OK}"/>
+                </Widget>
+            </Widget>
+        </Widget>
+    </Widget>
+</MyGUI>
