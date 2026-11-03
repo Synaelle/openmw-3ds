@@ -45,12 +45,12 @@ jobs:
       image: ${{ steps.tag.outputs.image }}
     steps:
       - uses: actions/checkout@v4
-      - name: The image's tag, from the git tree of 3ds/deps
+      - name: The image's tag, from 3ds/deps and the image's Dockerfile
         id: tag
         run: |
-          tree=$(git rev-parse HEAD:3ds/deps)
-          echo "tree=$tree" >> "$GITHUB_OUTPUT"
-          echo "image=$DEPS_IMAGE:deps-${tree:0:12}" >> "$GITHUB_OUTPUT"
+          id=$(bash 3ds/ci/deps-id.sh)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "image=$DEPS_IMAGE:deps-${id:0:12}" >> "$GITHUB_OUTPUT"
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -60,13 +60,13 @@ jobs:
       - name: Build it unless it exists
         env:
           IMAGE: ${{ steps.tag.outputs.image }}
-          TREE: ${{ steps.tag.outputs.tree }}
+          ID: ${{ steps.tag.outputs.id }}
         run: |
           if docker manifest inspect "$IMAGE" > /dev/null 2>&1; then
             echo "$IMAGE exists"
             exit 0
           fi
-          docker build -f 3ds/ci/deps.Dockerfile --build-arg "DEPS_TREE=$TREE" \
+          docker build -f 3ds/ci/deps.Dockerfile --build-arg "DEPS_ID=$ID" \
             --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
             -t "$IMAGE" -t "$DEPS_IMAGE:latest" .
           docker push "$IMAGE"

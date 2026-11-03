@@ -15,22 +15,22 @@ RUN dkp-pacman -Sy --noconfirm --needed 3ds-dev 3ds-zlib 3ds-lz4 3ds-yaml_cpp 3d
         3ds-freetype 3ds-libjpeg-turbo 3ds-bzip2 \
     && dkp-pacman -Scc --noconfirm
 
-RUN curl -sSfL -o /tmp/makerom.zip \
-        https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.19.0/makerom-v0.19.0-ubuntu_x86_64.zip \
-    && unzip -q /tmp/makerom.zip -d /tmp/makerom \
-    && install -m 755 "$(find /tmp/makerom -name makerom -type f | head -1)" /usr/local/bin/makerom \
-    && curl -sSfL -o /tmp/bannertool.tar.gz \
-        https://github.com/carstene1ns/3ds-bannertool/releases/download/1.2.3/bannertool-1.2.3-linux.tar.gz \
-    && mkdir /tmp/bannertool && tar -xzf /tmp/bannertool.tar.gz -C /tmp/bannertool \
-    && install -m 755 "$(find /tmp/bannertool -name bannertool -type f | grep -m1 x86_64 || find /tmp/bannertool -name bannertool -type f | head -1)" \
-        /usr/local/bin/bannertool \
-    && rm -rf /tmp/makerom* /tmp/bannertool* \
-    && makerom -version | head -1 && bannertool 2>&1 | head -1
+# makerom and bannertool built here: their prebuilt Linux releases need a newer glibc than this image's.
+RUN git clone -q --depth 1 --branch makerom-v0.19.0 https://github.com/3DSGuy/Project_CTR.git /tmp/ctr \
+    && make -C /tmp/ctr/makerom deps -j"$(nproc)" > /dev/null \
+    && make -C /tmp/ctr/makerom -j"$(nproc)" > /dev/null \
+    && install -m 755 "$(find /tmp/ctr/makerom -name makerom -type f -perm -u+x | head -1)" /usr/local/bin/makerom \
+    && git clone -q --depth 1 --branch 1.2.3 --recurse-submodules https://github.com/carstene1ns/3ds-bannertool.git /tmp/bannertool \
+    && cmake -S /tmp/bannertool -B /tmp/bannertool/build -G Ninja -DCMAKE_BUILD_TYPE=Release > /dev/null \
+    && cmake --build /tmp/bannertool/build > /dev/null \
+    && install -m 755 "$(find /tmp/bannertool/build -name bannertool -type f | head -1)" /usr/local/bin/bannertool \
+    && rm -rf /tmp/ctr /tmp/bannertool \
+    && makerom 2>&1 | head -2 && bannertool 2>&1 | head -2 && ldd /usr/local/bin/bannertool /usr/local/bin/makerom
 
 COPY 3ds/deps /work/3ds/deps
 RUN bash /work/3ds/deps/build-deps.sh \
     && rm -rf /work/3ds/.deps/build /work/3ds/.deps/src /work/3ds/.deps/pristine /work/3ds/.deps/downloads
 
-# The git tree of 3ds/deps the image was built from: a build checks it against its own (3ds/ci/check-deps.sh).
-ARG DEPS_TREE=unknown
-RUN echo "$DEPS_TREE" > /work/deps-tree
+# The image's id (3ds/ci/deps-id.sh): a build checks it against its own commit's (3ds/ci/check-deps.sh).
+ARG DEPS_ID=unknown
+RUN echo "$DEPS_ID" > /work/deps-id
