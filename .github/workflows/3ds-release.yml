@@ -201,7 +201,7 @@ jobs:
           set -eu
           ls -la out
           files=$(find out -type f ! -name 'port-*' | sort)
-          test "$(echo "$files" | wc -l)" -eq 6
+          test "$(echo "$files" | wc -l)" -eq 5
           gh release upload "$TAG" $files --clobber
           gh release edit "$TAG" --draft=false --latest
           echo "published $TAG"
